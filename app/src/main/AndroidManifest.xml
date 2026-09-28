@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 音乐进度应用选择器需要枚举所有可启动应用 -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <application
+        android:name=".TapDockApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.TapDock">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".DownloadPickerActivity"
+            android:exported="false"
+            android:label="@string/download_pick_title" />
+
+        <activity
+            android:name=".CardOrderActivity"
+            android:exported="false"
+            android:label="@string/card_order_title" />
+
+        <!-- Hook 侧轮询读取配置的入口（即使广播丢失/XSharedPreferences 失效也生效） -->
+        <provider
+            android:name=".DockConfigProvider"
+            android:authorities="com.lsp102.tapdock.config"
+            android:exported="true" />
+
+        <!-- LSPosed / Xposed 模块声明 -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="@string/xposed_desc" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="dock_prefs" />
+    </application>
+</manifest>

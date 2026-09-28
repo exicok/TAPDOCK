@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TapDock</string>
+    <string name="app_subtitle">LSPosed 纯模块 · 基础任务栏 Dock</string>
+
+    <string name="xposed_desc">AOSP 任务栏 Dock（基础版）：往系统状态栏/任务栏布局里注入一个黑色圆角 Dock 条，可靠左/靠右，可重启 SystemUI</string>
+
+    <string name="main_hook_title">LSPosed 模块</string>
+    <string name="main_hook_desc">在 LSPosed 管理器中启用本模块，作用域勾选「系统界面 (SystemUI)」与「桌面 (Launcher)」。修改下方开关后，点「重启 SystemUI」立即生效。</string>
+    <string name="main_hook_switch">显示任务栏 Dock</string>
+    <string name="main_hook_active">已注入 ✓</string>
+    <string name="main_hook_inactive">未注入（启用模块并重启 SystemUI 后生效）</string>
+    <string name="main_hook_off">已隐藏</string>
+
+    <string name="opt_align">Dock 位置</string>
+    <string name="align_left">靠左</string>
+    <string name="align_right">靠右</string>
+
+    <string name="btn_restart_systemui">重启 SystemUI（使设置生效）</string>
+    <string name="restart_ok">SystemUI 已重启</string>
+    <string name="restart_fail">重启失败：未获得 root 权限</string>
+
+    <string name="sec_progress">进度显示</string>
+    <string name="opt_progress_color">进度条颜色</string>
+    <string name="opt_download_apps">下载进度（读取下载器通知）</string>
+    <string name="dl_summary_fmt">已选 %1$d 个下载器应用</string>
+    <string name="dl_summary_all">跟踪全部应用的通知</string>
+    <string name="btn_dl_pick">选择下载器应用…</string>
+    <string name="opt_card_order">控制中心卡片</string>
+    <string name="opt_nyan">进度条彩虹猫风格（流动）</string>
+    <string name="opt_album_bg">播放音乐时 Dock 背景显示模糊封面</string>
+    <string name="opt_album_thumb">播放音乐时在进度条左侧显示封面小图</string>
+    <string name="opt_cpu_chart">控制中心状态区显示 CPU 全核心占用图</string>
+    <string name="btn_card_pick">排列卡片顺序…</string>
+    <string name="card_order_title">控制中心卡片</string>
+    <string name="card_order_hint">长按卡片拖动换位</string>
+    <string name="card_order_reset">恢复默认</string>
+    <string name="download_pick_title">下载进度应用</string>
+    <string name="picker_all">全选</string>
+    <string name="picker_none">取消全选</string>
+    <string name="picker_done">完成</string>
+    <string name="picker_count_fmt">已选 %1$d 个</string>
+    <string name="picker_empty">设备上没有可启动的应用</string>
+
+    <string name="music_unknown_title">未知曲目</string>
+    <string name="music_unknown_artist">未知艺术家</string>
+
+    <string name="main_hint">点击 Dock 弹出控制中心（WLAN / 蓝牙 / 移动数据 / 定位 / 手电筒 / 摄像头 / 麦克风）；Dock 内置进度显示：充电优先、其次系统下载，均无则为空条。位置与开关修改即时生效。</string>
+    <string name="toast_toggle_failed">该开关不可用（权限不足或设备不支持）</string>
+</resources>

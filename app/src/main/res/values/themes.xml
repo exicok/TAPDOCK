@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- DayNight 跟随系统深浅色；DynamicColors 在 Android 12+ 自动套用系统主题色 -->
+    <style name="Theme.TapDock" parent="Theme.Material3.DayNight.NoActionBar" />
+
+    <style name="Text.SectionHeader" parent="TextAppearance.Material3.TitleMedium">
+        <item name="android:textColor">?attr/colorPrimary</item>
+        <item name="android:paddingTop">20dp</item>
+        <item name="android:paddingBottom">6dp</item>
+    </style>
+
+    <style name="Text.RowLabel" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textColor">?attr/colorOnSurface</item>
+    </style>
+
+    <style name="Text.RowValue" parent="TextAppearance.Material3.BodySmall">
+        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
+        <item name="android:paddingStart">8dp</item>
+    </style>
+
+    <style name="Text.Desc" parent="TextAppearance.Material3.BodySmall">
+        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
+    </style>
+</resources>

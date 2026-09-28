@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- LSPosed 作用域：SystemUI（状态栏）与桌面（12L 任务栏） -->
+    <string-array name="xposed_scope">
+        <item>com.android.systemui</item>
+        <item>com.android.launcher3</item>
+        <item>com.google.android.apps.nexuslauncher</item>
+    </string-array>
+</resources>

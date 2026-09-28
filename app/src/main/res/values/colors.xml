@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#3DDC84</color>
+    <color name="window_bg">#101014</color>
+    <color name="surface">#17171C</color>
+    <color name="surface_variant">#202027</color>
+    <color name="text_primary">#EDEDF2</color>
+    <color name="text_secondary">#9A9AA5</color>
+    <color name="ic_launcher_background">#141419</color>
+</resources>
