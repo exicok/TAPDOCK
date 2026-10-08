@@ -95,11 +95,7 @@ class DownloadPickerActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        HookSync.notify(
-            this, prefs.hookEnabled, prefs.dockAlign, prefs.progressColor,
-            prefs.downloadPackages, prefs.cardOrder, prefs.nyanStyle, prefs.albumArtBg,
-            prefs.albumThumb, prefs.cpuChart,
-        )
+        HookSync.notify(this, prefs)
     }
 
     private fun refreshAll() {

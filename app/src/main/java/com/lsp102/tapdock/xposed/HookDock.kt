@@ -9,6 +9,8 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -31,9 +33,11 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.view.Gravity
 import android.view.View
@@ -42,6 +46,7 @@ import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.Toast
 import android.widget.TextView
 import de.robv.android.xposed.XSharedPreferences
 import de.robv.android.xposed.XC_MethodHook
@@ -82,6 +87,11 @@ object HookDock {
     const val EXTRA_ALBUM = "album"
     const val EXTRA_THUMB = "thumb"
     const val EXTRA_CPU = "cpu"
+    const val EXTRA_BADGE = "badge"
+    const val EXTRA_OTP = "otp"
+    const val EXTRA_PKG = "pkgcode"
+    const val EXTRA_NCARD = "ncard"
+    const val EXTRA_MAXW = "maxw"
     const val ALIGN_LEFT = "left"
     const val ALIGN_RIGHT = "right"
 
@@ -97,12 +107,19 @@ object HookDock {
     const val DOCK_CORNER_DP = 12
     private const val MIN_WIDTH_STATUS_DP = 122
     private const val MIN_WIDTH_TASKBAR_DP = 156
+    private const val DEFAULT_MAXW_DP = 220
     private const val ICON_STATUS_DP = 13
     private const val ICON_TASKBAR_DP = 18
     private const val ICON_GAP_STATUS_DP = 4
     private const val ICON_GAP_TASKBAR_DP = 6
     private const val TRACK_H_STATUS_DP = 4
     private const val TRACK_H_TASKBAR_DP = 6
+
+    /** 占用摄像头 / 麦克风的应用图标最多画几颗：再多 Dock 就成图标抽屉了 */
+    private const val PRIV_ICONS = 2
+
+    /** 图标达到这个颗数就把进度条整条让开：胶囊再挤下去谁都没了 */
+    private const val TRACK_OFF_ICONS = 4
     private const val POLL_MS = 3000L
     private const val CLOCK_MS = 1000L
     private const val BADGE_COLOR = 0x40FFFFFF
@@ -117,10 +134,28 @@ object HookDock {
     private val DOCK_INTERPOLATOR = PathInterpolator(0.4f, 0f, 0.2f, 1f)
 
     // 需要从系统状态栏隐藏、改由 Dock 接管显示的图标槽位
-    private val HIDDEN_SLOTS = setOf("wifi", "bluetooth", "location", "vpn")
+    private val HIDDEN_SLOTS = setOf("wifi", "bluetooth", "location", "vpn", "hotspot")
+
+    /** 热点连接设备数那颗小字（挂在 iconsRow 里，靠 tag 找，不进 DockViews） */
+    private const val TAG_HS = "tapdock_hotspot_count"
 
     /** iconRes 里从这一格起是隐私类（摄像头 / 麦克风）：播放封面时它们也不让位 */
     private const val PRIVACY_ICON_FROM = 4
+
+    /** iconRes 的第 0 格 */
+    private const val WIFI_ICON = 0
+
+    /** iconRes 的末位：热点；连上的台数就写在这颗图标右边 */
+    private const val HOTSPOT_ICON = 7
+
+    /** WiFi 按信号强度分格画：第 0 格是完整扇形，用于连不上/读不到信号时兜底 */
+    private val WIFI_LEVEL_ICONS = intArrayOf(
+        com.lsp102.tapdock.R.drawable.ic_tile_wifi,
+        com.lsp102.tapdock.R.drawable.ic_dock_wifi_1,
+        com.lsp102.tapdock.R.drawable.ic_dock_wifi_2,
+        com.lsp102.tapdock.R.drawable.ic_dock_wifi_3,
+        com.lsp102.tapdock.R.drawable.ic_dock_wifi_4,
+    )
 
     // 摄像头/麦克风占用时出现的原生隐私胶囊（aapt2 确认 id 为 privacy_chip / privacy_container，
     // 视图类 OngoingPrivacyChip），同样由 Dock 接管：只在视图层隐藏，
@@ -175,6 +210,36 @@ object HookDock {
 
     /** 状态区的 CPU 全核心图开关（同上） */
     private val overrideCpu = AtomicReference<Boolean?>(null)
+
+    /** Dock 左侧通知数徽标开关（同上） */
+    private val overrideBadge = AtomicReference<Boolean?>(null)
+
+    /** 短信验证码显示开关（同上） */
+    private val overrideOtp = AtomicReference<Boolean?>(null)
+
+    /** 快递取件码提示开关（同上） */
+    private val overridePkg = AtomicReference<Boolean?>(null)
+
+    /** 通知横幅由 Dock 接管开关（同上） */
+    private val overrideNcard = AtomicReference<Boolean?>(null)
+
+    /** 上一次下发给系统的"接管原生横幅"状态，只有它变了才去写全局设置 */
+    private var lastHeadsUpTakeover: Boolean? = null
+
+    /** 上一次画在 Dock 上的验证码，用来判断这一帧要不要重排 */
+    private var lastOtp = ""
+
+    /** 上一次画在 Dock 上的热点连接数，同上 */
+    private var lastHs = ""
+
+    /** 上一次 WiFi 图标用的第几格（WIFI_LEVEL_ICONS 下标），换格才重画 */
+    private var lastWifiLevel = -1
+
+    /** 上一次回报给 App 预览的 Dock 内容签名，内容没变不重复发广播 */
+    private var lastMirrorSig = ""
+
+    /** Dock 最大宽度（dp，0 = 不限）（App 里的档位，走同一套三级通道） */
+    private val overrideMaxW = AtomicReference<Int>(null)
     private var lastPercent: Int? = null
     private var lastStates: BooleanArray? = null
 
@@ -192,14 +257,23 @@ object HookDock {
     /** pkg -> 应用名，解析一次就缓存（每次刷新查 PackageManager 没必要） */
     private val appLabels = HashMap<String, String>()
 
+    /** pkg -> 应用图标，同上；图标 Drawable 按 constantState 现取一份，不和多颗图标共用实例 */
+    private val appIcons = HashMap<String, Drawable?>()
+
+    /** 上一次画在 Dock 上的占用应用，用来判断这一帧要不要重排 */
+    private var lastPrivPkgs: List<String> = emptyList()
+
     private class DockViews(
         val root: LinearLayout,
         val track: FrameLayout,
         val fill: NyanFillView,
         val icons: List<ImageView>,
+        /** 占用摄像头 / 麦克风的应用图标位 */
+        val priv: List<ImageView>,
         val art: ImageView,
         val clock: TextView,
         val badge: TextView,
+        val otp: TextView,
         val back: ImageView,
         val pill: GradientDrawable,
         val minWidth: Int,
@@ -211,9 +285,11 @@ object HookDock {
         val track: FrameLayout,
         val fill: NyanFillView,
         val icons: List<ImageView>,
+        val priv: List<ImageView>,
         val art: ImageView,
         val clock: TextView,
         val badge: TextView,
+        val otp: TextView,
         val back: ImageView,
         val pill: GradientDrawable,
         val minWidth: Int,
@@ -277,6 +353,22 @@ object HookDock {
         return set.ifEmpty { null }
     }
 
+    /** 通知横幅由 Dock 接管：开 = 关掉系统原生横幅，改画自家卡片 */
+    private fun notifCard(): Boolean =
+        overrideNcard.get() ?: (loadPrefs()?.getBoolean("notif_card", true) ?: true)
+
+    /**
+     * 把"接管横幅"这个决定落到系统全局设置上。
+     * 只在我们自己的配置真的变了时写：用户进系统设置手动改回去，不该每帧跟他抢。
+     */
+    private fun syncHeadsUpSetting(context: Context) {
+        val on = notifCard()
+        if (lastHeadsUpTakeover == on) return
+        lastHeadsUpTakeover = on
+        NotificationCard.applyHeadsUpSetting(context, on)
+        if (!on) NotificationCard.shutdown()
+    }
+
     /**
      * 摄像头 / 麦克风正在被占用 → Dock 底色转红警示。
      * 定位不参与：本 ROM 的 PrivacyItemController.locationAvailable 恒为 false，
@@ -303,7 +395,7 @@ object HookDock {
             val index = if (alignRight()) parent.childCount else 0
             parent.addView(v.root, index, lp)
             synchronized(bindings) {
-                bindings.add(Binding(v.root, v.track, v.fill, v.icons, v.art, v.clock, v.badge, v.back, v.pill, v.minWidth,
+                bindings.add(Binding(v.root, v.track, v.fill, v.icons, v.priv, v.art, v.clock, v.badge, v.otp, v.back, v.pill, v.minWidth,
                     v.collapsedWidth, parent, isFrame = false))
             }
             ensureReceiver(context)
@@ -328,7 +420,7 @@ object HookDock {
             )
             parent.addView(v.root, lp)
             synchronized(bindings) {
-                bindings.add(Binding(v.root, v.track, v.fill, v.icons, v.art, v.clock, v.badge, v.back, v.pill, v.minWidth,
+                bindings.add(Binding(v.root, v.track, v.fill, v.icons, v.priv, v.art, v.clock, v.badge, v.otp, v.back, v.pill, v.minWidth,
                     v.collapsedWidth, parent, isFrame = true))
             }
             ensureReceiver(context)
@@ -356,7 +448,9 @@ object HookDock {
         // 控制中心展开时，遮罩的清晰排除区按 Dock 当前位置算；胶囊一变形就得重算，
         // 否则旧位置会留下一块清晰矩形。
         root.addOnLayoutChangeListener { v, l, t, r, b, ol, ot, or, ob ->
-            if (l != ol || t != ot || r != or || b != ob) ControlPanel.refreshBackdropBlur()
+            if (l != ol || t != ot || r != or || b != ob) {
+                ControlPanel.refreshBackdropBlur()
+            }
         }
         // 猫画在彩虹带上方，会越出 Dock 自己的边界
         root.clipChildren = false
@@ -366,6 +460,7 @@ object HookDock {
 
         // 状态图标排最左：仅激活的项显示
         // WiFi/蓝牙/定位/VPN = 接管自系统状态栏；摄像头/麦克风 = 实际占用时
+        // 末位 = 未读短信里有快递取件码（只亮图标，码和短信内容进面板才给看）
         val iconSize = dp(context, if (compact) ICON_STATUS_DP else ICON_TASKBAR_DP)
         val gap = dp(context, if (compact) ICON_GAP_STATUS_DP else ICON_GAP_TASKBAR_DP)
         val iconRes = intArrayOf(
@@ -375,6 +470,8 @@ object HookDock {
             com.lsp102.tapdock.R.drawable.ic_tile_vpn,
             com.lsp102.tapdock.R.drawable.ic_tile_camera,
             com.lsp102.tapdock.R.drawable.ic_tile_mic,
+            com.lsp102.tapdock.R.drawable.ic_row_package,
+            com.lsp102.tapdock.R.drawable.ic_tile_hotspot,
         )
         val iconsRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -392,6 +489,30 @@ object HookDock {
             }
             iconsRow.addView(iv)
             iv
+        }
+        // 热点连接设备数：紧贴图标串的一颗小数字，热点没开 / 数读不到都不占位。
+        // 挂在 iconsRow 里、按 tag 找，就不必为它改 DockViews/Binding 的构造参数串
+        val hs = TextView(context).apply {
+            tag = TAG_HS
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = if (compact) 9f else 11f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            includeFontPadding = false
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = gap / 2 }
+        }
+        iconsRow.addView(hs)
+        // 占用摄像头 / 麦克风的应用图标：跟在隐私图标后面，画的是那个应用自己的图标
+        val priv = (0 until PRIV_ICONS).map {
+            ImageView(context).apply {
+                visibility = View.GONE
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                layoutParams = LinearLayout.LayoutParams(iconSize, iconSize).apply {
+                    marginEnd = gap
+                }
+            }.also { iconsRow.addView(it) }
         }
         // 控制中心展开时唯一留下的返回图标（平时隐藏，Dock 同时缩到最小宽度）
         val back = ImageView(context).apply {
@@ -421,7 +542,43 @@ object HookDock {
             badge,
             LinearLayout.LayoutParams(badgeSize, badgeSize).apply { marginEnd = gap }
         )
+
+        // 短信验证码：等宽数字 + 半透明底，点一下复制到剪贴板。平时不占位
+        val otp = TextView(context).apply {
+            gravity = Gravity.CENTER
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = if (compact) 10f else 12f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            includeFontPadding = false
+            setPadding(gap, gap / 2, gap, gap / 2)
+            visibility = View.GONE
+            background = GradientDrawable().apply {
+                setColor(0x40FFFFFF)
+                cornerRadius = dp(context, 6).toFloat()
+            }
+            setOnClickListener { copyOtp(context) }
+        }
+        root.addView(otp, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = gap })
         root.addView(iconsRow)
+
+        // Dock 空着（既没图标也没进度条）时显示时钟；只挂两颗图标的稀疏状态下，
+        // 右边那点空白也让给时间。等宽字体免得秒跳时宽度抖。
+        // 排在图标之后、进度条之前：彩虹猫那颗头会越出轨道右沿，压在末位的时间上
+        val clock = TextView(context).apply {
+            visibility = View.GONE
+            gravity = Gravity.CENTER
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = if (compact) 11f else 13f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
+        root.addView(
+            clock,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            )
+        )
 
         // 进度条左侧的封面小图：只有播放中且开关打开才占位，平时整格让给图标 / 时钟
         val art = ImageView(context).apply {
@@ -454,19 +611,6 @@ object HookDock {
         fill.setCat(scaledCat(context, dp(context, if (compact) 20 else 26)))
         root.addView(track)
 
-        // Dock 空着（既没图标也没进度条）时显示时钟；等宽字体免得秒跳时宽度抖
-        val clock = TextView(context).apply {
-            visibility = View.GONE
-            gravity = Gravity.CENTER
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = if (compact) 11f else 13f
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-        }
-        root.addView(
-            clock,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        )
-
         root.visibility = if (enabled()) View.VISIBLE else View.GONE
 
         // 全圆角（胶囊形）：布局完成后把圆角设为高度的一半
@@ -482,7 +626,7 @@ object HookDock {
         root.isClickable = true
         root.setOnClickListener { ControlPanel.toggle(root) }
         return DockViews(
-            root, track, fill, icons, art, clock, badge, back, bg, root.minimumWidth,
+            root, track, fill, icons, priv, art, clock, badge, otp, back, bg, root.minimumWidth,
             padH * 2 + iconSize
         )
     }
@@ -499,15 +643,40 @@ object HookDock {
             lastStates = null
             applyContent()
         }
-        // WiFi/蓝牙/定位/VPN：从系统状态栏隐藏，改由 Dock 显示
+        // WiFi/蓝牙/定位/VPN/热点：从系统状态栏隐藏，改由 Dock 显示
         hideStatusBarIcons(appCtx)
+        // 热点连接台数要起进程采，几十毫秒不能占绘制线程；开关状态本身每帧现读
+        HotspotSource.start(appCtx)
         // 下载进度：监听 SystemUI 通知管线里的下载器通知
         startNotificationWatch(appCtx)
+        // 横幅接管：开机 / SystemUI 重启后按当前配置下一次全局开关
+        syncHeadsUpSetting(appCtx)
         // 状态图标：接真实事件源，变化当帧刷新（轮询退化为兜底）
         startStateWatchers(appCtx)
+        // 系统控制块：SystemUI 进程当引擎（建 / 点磁贴），桌面进程只缓存广播来的快照
+        SystemTiles.attach(appCtx, appCtx.packageName == "com.android.systemui")
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context?, intent: Intent?) {
                 if (intent == null) return
+                if (intent.action == com.lsp102.tapdock.HookSync.HookActions.DOCK_QUERY) {
+                    // App 首页要画预览：作废签名，让下一次 applyContent 必然回报一次
+                    lastMirrorSig = ""
+                    main.post { applyContent() }
+                    return
+                }
+                if (intent.action == com.lsp102.tapdock.HookSync.HookActions.SYSSTAT_STATE) {
+                    intent.getStringExtra(com.lsp102.tapdock.HookSync.HookActions.EXTRA_SYSSTAT)
+                        ?.let { SysStatSource.ingest(it) }
+                    return
+                }
+                // 系统控制块的三种广播直接交给 SystemTiles
+                if (intent.action == SystemTiles.ACTION_CLICK ||
+                    intent.action == SystemTiles.ACTION_REFRESH ||
+                    intent.action == SystemTiles.ACTION_SNAPSHOT
+                ) {
+                    SystemTiles.handleIntent(intent, appCtx)
+                    return
+                }
                 if (intent.hasExtra(EXTRA_SHOW)) {
                     overrideShow.set(intent.getBooleanExtra(EXTRA_SHOW, true))
                 }
@@ -534,11 +703,31 @@ object HookDock {
                     main.post { applyContent() }
                 }
                 if (intent.hasExtra(EXTRA_ALBUM)) {
-                    overrideAlbum.set(intent.getBooleanExtra(EXTRA_ALBUM, true))
+                    overrideAlbum.set(intent.getBooleanExtra(EXTRA_ALBUM, false))
                     main.post { applyContent() }
                 }
                 if (intent.hasExtra(EXTRA_CPU)) {
                     overrideCpu.set(intent.getBooleanExtra(EXTRA_CPU, false))
+                }
+                if (intent.hasExtra(EXTRA_BADGE)) {
+                    overrideBadge.set(intent.getBooleanExtra(EXTRA_BADGE, true))
+                    main.post { applyContent() }
+                }
+                if (intent.hasExtra(EXTRA_OTP)) {
+                    overrideOtp.set(intent.getBooleanExtra(EXTRA_OTP, true))
+                    main.post { applyContent() }
+                }
+                if (intent.hasExtra(EXTRA_PKG)) {
+                    overridePkg.set(intent.getBooleanExtra(EXTRA_PKG, true))
+                    main.post { applyContent() }
+                }
+                if (intent.hasExtra(EXTRA_NCARD)) {
+                    overrideNcard.set(intent.getBooleanExtra(EXTRA_NCARD, true))
+                    syncHeadsUpSetting(appCtx)
+                }
+                if (intent.hasExtra(EXTRA_MAXW)) {
+                    overrideMaxW.set(intent.getIntExtra(EXTRA_MAXW, DEFAULT_MAXW_DP))
+                    main.post { applyContent() }
                 }
                 if (intent.hasExtra(EXTRA_THUMB)) {
                     overrideThumb.set(intent.getBooleanExtra(EXTRA_THUMB, true))
@@ -549,7 +738,13 @@ object HookDock {
                 main.post { rebuildAll() }
             }
         }
-        val filter = IntentFilter(ACTION_RELOAD)
+        val filter = IntentFilter(ACTION_RELOAD).apply {
+            addAction(SystemTiles.ACTION_CLICK)
+            addAction(SystemTiles.ACTION_REFRESH)
+            addAction(SystemTiles.ACTION_SNAPSHOT)
+            addAction(com.lsp102.tapdock.HookSync.HookActions.DOCK_QUERY)
+            addAction(com.lsp102.tapdock.HookSync.HookActions.SYSSTAT_STATE)
+        }
         try {
             if (Build.VERSION.SDK_INT >= 33) {
                 appCtx.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
@@ -669,6 +864,8 @@ object HookDock {
             try {
                 fetchRemoteState()
                 applyContent()
+                // 引擎侧顺便刷新面板在用的系统磁贴（宿主侧这行是空操作）
+                SystemTiles.pushStates(cardOrder())
             } catch (t: Throwable) {
                 XposedBridge.log("[TapDock] tick error: $t")
             }
@@ -698,6 +895,18 @@ object HookDock {
                         if (ti >= 0) overrideThumb.set(c.getInt(ti) == 1)
                         val cpi = c.getColumnIndex("cpu")
                         if (cpi >= 0) overrideCpu.set(c.getInt(cpi) == 1)
+                        val bi = c.getColumnIndex("badge")
+                        if (bi >= 0) overrideBadge.set(c.getInt(bi) == 1)
+                        val otpi = c.getColumnIndex("otp")
+                        if (otpi >= 0) overrideOtp.set(c.getInt(otpi) == 1)
+                        val poi = c.getColumnIndex("pkgon")
+                        if (poi >= 0) overridePkg.set(c.getInt(poi) == 1)
+                        val nci = c.getColumnIndex("ncard")
+                        if (nci >= 0) overrideNcard.set(c.getInt(nci) == 1)
+                        val pci = c.getColumnIndex("pkgcode")
+                        if (pci >= 0) PackageCodeSource.ingest(c.getString(pci) ?: "")
+                        val mwi = c.getColumnIndex("maxw")
+                        if (mwi >= 0) overrideMaxW.set(c.getInt(mwi))
                         if (ai >= 0) overrideAlignRight.set(c.getString(ai) != ALIGN_LEFT)
                         if (ci >= 0) overrideColor.set(c.getInt(ci))
                         if (oi >= 0) {
@@ -716,10 +925,12 @@ object HookDock {
         } catch (_: Throwable) {
             // App 未安装/进程不可用：保持当前状态
         }
+        // 配置里"接管横幅"变了就顺手下发（内部按上一次状态判重，不会每 3 秒写一次设置）
+        syncHeadsUpSetting(ctx)
     }
 
     /** 刷新状态图标 + 进度填充 */
-    private fun applyContent() {
+    internal fun applyContent() {
         val snapshot = synchronized(bindings) { bindings.toList() }
         if (snapshot.isEmpty()) return
         val context = snapshot[0].root.context
@@ -735,9 +946,12 @@ object HookDock {
             for (b in snapshot) {
                 b.back.visibility = View.VISIBLE
                 b.badge.visibility = View.GONE
+                b.otp.visibility = View.GONE
+                b.root.findViewWithTag<TextView>(TAG_HS)?.visibility = View.GONE
                 b.art.visibility = View.GONE
                 b.track.visibility = View.GONE
                 b.icons.forEach { it.visibility = View.GONE }
+                b.priv.forEach { it.visibility = View.GONE }
                 b.root.minimumWidth = 0
             }
             // 必须走 updateClock 把 clockVisible 一起落下：只置 GONE 的话
@@ -748,6 +962,7 @@ object HookDock {
         }
         for (b in snapshot) {
             b.root.minimumWidth = b.minWidth
+            clampDockWidth(b, context)
             // 返回图标只在控制中心展开时存在，这里每帧定死，不靠切换那一帧
             b.back.visibility = View.GONE
             // 记一次展开态的实测宽度，收起动画结束时按它放回去
@@ -761,19 +976,45 @@ object HookDock {
 
         // 状态图标：仅激活的项显示；播放中封面小图接管左侧，此时整批图标让位
         val states = statusStates(context)
+        // WiFi 按信号强度分格。格数没变就不动图：setImageDrawable 每次都会重绘整条 Dock
+        val wifiLevel = if (states[WIFI_ICON]) wifiIconLevel(context) else lastWifiLevel
+        if (wifiLevel != lastWifiLevel) {
+            lastWifiLevel = wifiLevel
+            XposedBridge.log("[TapDock] wifi icon level = $wifiLevel")
+            val res = WIFI_LEVEL_ICONS[wifiLevel]
+            snapshot.forEach { b ->
+                ModuleRes.drawable(context, res)?.let { b.icons[WIFI_ICON].setImageDrawable(it) }
+            }
+        }
         val warn = privacyWarn()
-        val notifCount = synchronized(activeNotifs) { activeNotifs.size }
+        // 徽标一关，通知数就完全不参与 Dock 排版：不占位，也不压掉空档时的时钟
+        val notifCount =
+            if (notifBadge()) synchronized(activeNotifs) { activeNotifs.size } else 0
+        val otpText = if (showOtp()) OtpSource.peek()?.text ?: "" else ""
+        // 热点那格亮了才写台数：采样最多滞后 5 秒，图标灭了数字得跟着灭，不留尾巴
+        val hsCount = HotspotSource.clients
+        val hsText = if (!states[HOTSPOT_ICON] || hsCount < 0) "" else hsCount.toString()
+        val privPkgs = privacyUsers()
         val changed = lastStates == null || !lastStates.contentEquals(states) ||
-            warn != lastPrivacyWarn || notifCount != lastNotifCount || artShown != lastArtShown
+            warn != lastPrivacyWarn || notifCount != lastNotifCount || artShown != lastArtShown ||
+            otpText != lastOtp || privPkgs != lastPrivPkgs || hsText != lastHs
         if (changed) {
-            val anyIcon = anyIconShown(states, artShown) || notifCount > 0
+            val anyIcon = anyIconShown(states, artShown) || privPkgs.isNotEmpty() ||
+                notifCount > 0 || otpText.isNotEmpty()
             val badgeText = if (notifCount > 99) "99+" else notifCount.toString()
             for (b in snapshot) {
                 b.badge.visibility = if (notifCount > 0) View.VISIBLE else View.GONE
                 b.badge.text = badgeText
+                b.otp.visibility = if (otpText.isEmpty()) View.GONE else View.VISIBLE
+                b.otp.text = otpText
+                b.root.findViewWithTag<TextView>(TAG_HS)?.apply {
+                    visibility = if (hsText.isEmpty()) View.GONE else View.VISIBLE
+                    text = hsText
+                }
                 b.icons.forEachIndexed { i, iv ->
                     iv.visibility = if (showsIcon(states, artShown, i)) View.VISIBLE else View.GONE
                 }
+                b.priv.forEachIndexed { i, iv -> applyPrivIcon(iv, privPkgs.getOrNull(i)) }
                 // 图标与进度条之间的间距只在有内容时保留
                 val tlp = b.track.layoutParams as? LinearLayout.LayoutParams
                 if (tlp != null) {
@@ -783,8 +1024,11 @@ object HookDock {
             }
             lastStates = states
             lastArtShown = artShown
+            lastPrivPkgs = privPkgs
             lastPrivacyWarn = warn
             lastNotifCount = notifCount
+            lastOtp = otpText
+            lastHs = hsText
             // 隐私占用时整条 Dock 转红（复用同一个 GradientDrawable，保住胶囊圆角）
             val bg = dockBackgroundColor()
             for (b in snapshot) b.pill.setColor(bg)
@@ -798,13 +1042,18 @@ object HookDock {
         }
 
         // 进度（下载器通知 > 音乐播放 > 充电）
+        // 充电满格不再占进度条：100% 是一条没有信息量的满带，让位给时钟
         val percent = downloadPercent()
             ?: music.percent
-            ?: ChargeProgressSource.snapshot(context)
-        // 图标、徽标、封面和进度条都没东西可显示时，Dock 空出来显示时钟
+            ?: ChargeProgressSource.snapshot(context)?.takeIf { it < 100 }
+        val shownIcons = states.indices.count { showsIcon(states, artShown, it) } + privPkgs.size
+        // Dock 宽度有限：验证码要占位、图标挤到四颗以上，进度条整条让开
+        val trackPercent =
+            if (otpText.isEmpty() && shownIcons < TRACK_OFF_ICONS) percent else null
+        // 时钟只在进度条不占位时出现：两者都要吃图标右边那点剩余宽度，同时上会互相挤
         updateClock(
             snapshot,
-            !artShown && !states.any { it } && notifCount == 0 && percent == null
+            trackPercent == null && !artShown && otpText.isEmpty() && shownIcons <= 2
         )
         applyBackdrop(snapshot, music)
         applyThumb(snapshot, thumbArt, music.token)
@@ -812,8 +1061,10 @@ object HookDock {
         val colorChanged = color != lastColor
         val nyan = nyanStyle()
         val nyanChanged = nyan != lastNyan
-        if (percent == lastPercent && !changed && !colorChanged && !nyanChanged) return
-        lastPercent = percent
+        // 回报一份"此刻 Dock 上到底有什么"给 App 首页的预览；进度条让位时也别报进度
+        pushDockMirror(context, states, notifCount, otpText, trackPercent, nyan, color, artShown)
+        if (trackPercent == lastPercent && !changed && !colorChanged && !nyanChanged) return
+        lastPercent = trackPercent
         if (colorChanged) {
             lastColor = color
             snapshot.forEach { it.fill.setSolidColor(color) }
@@ -824,7 +1075,7 @@ object HookDock {
             snapshot.forEach { it.fill.setNyan(nyan) }
         }
         for (b in snapshot) {
-            if (percent == null) {
+            if (trackPercent == null) {
                 b.track.visibility = View.GONE
                 continue
             }
@@ -832,7 +1083,7 @@ object HookDock {
             val trackW = b.track.width
             if (trackW > 0) {
                 val lp = b.fill.layoutParams
-                lp.width = ((trackW * percent) / 100).coerceAtLeast(dp(b.fill.context, 3))
+                lp.width = ((trackW * trackPercent) / 100).coerceAtLeast(dp(b.fill.context, 3))
                 b.fill.layoutParams = lp
             }
         }
@@ -998,12 +1249,41 @@ object HookDock {
             .sortedByDescending { it.second }
             .map { appLabel(context, it.first) to it.second }
 
-    private fun appLabel(context: Context, pkg: String): String = appLabels.getOrPut(pkg) {
+    internal fun appLabel(context: Context, pkg: String): String = appLabels.getOrPut(pkg) {
         try {
             val pm = context.packageManager
             pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
         } catch (_: Throwable) {
             pkg
+        }
+    }
+
+    /** 正在占用摄像头 / 麦克风的应用：两边都用同一个应用时只画一颗 */
+    private fun privacyUsers(): List<String> =
+        (PrivacyMonitor.cameraPackages + PrivacyMonitor.microphonePackages)
+            .distinct().take(PRIV_ICONS)
+
+    /** 一颗占用应用图标位：换应用才取一次图标，取不到就不占位 */
+    private fun applyPrivIcon(iv: ImageView, pkg: String?) {
+        if (pkg == null) {
+            iv.visibility = View.GONE
+            iv.tag = null
+            return
+        }
+        if (iv.tag != pkg) {
+            iv.tag = pkg
+            val icon = appIcon(iv.context, pkg)
+            // 状态栏和任务栏两颗图标位共用一个 Drawable 会抢 callback，各取一份
+            iv.setImageDrawable(icon?.constantState?.newDrawable(iv.resources, null) ?: icon)
+        }
+        iv.visibility = if (iv.drawable == null) View.GONE else View.VISIBLE
+    }
+
+    internal fun appIcon(context: Context, pkg: String): Drawable? = appIcons.getOrPut(pkg) {
+        try {
+            context.packageManager.getApplicationIcon(pkg)
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -1016,15 +1296,96 @@ object HookDock {
 
     /** 播放音乐时 Dock 背景是否用模糊封面（App 里的开关） */
     internal fun albumArtBg(): Boolean =
-        overrideAlbum.get() ?: (loadPrefs()?.getBoolean("album_art_bg", true) ?: true)
+        overrideAlbum.get() ?: (loadPrefs()?.getBoolean("album_art_bg", false) ?: false)
 
     /** 进度条左侧是否显示封面小图（App 里的开关） */
     private fun albumThumb(): Boolean =
         overrideThumb.get() ?: (loadPrefs()?.getBoolean("album_thumb", true) ?: true)
 
-    /** 状态区是否显示 CPU 全核心占用图（App 里的开关，默认关） */
+    /** 状态区的资源占用图（CPU 全核心 / GPU / 内存 / zram）是否显示（App 里的开关，默认关） */
     internal fun cpuChart(): Boolean =
         overrideCpu.get() ?: (loadPrefs()?.getBoolean("cpu_chart", false) ?: false)
+
+    /** Dock 左侧的通知数徽标（App 里的开关，默认开） */
+    private fun notifBadge(): Boolean =
+        overrideBadge.get() ?: (loadPrefs()?.getBoolean("notif_badge", true) ?: true)
+
+    /** 短信验证码是否显示在 Dock 上（App 里的开关，默认开） */
+    internal fun showOtp(): Boolean =
+        overrideOtp.get() ?: (loadPrefs()?.getBoolean("show_otp", true) ?: true)
+
+    /** 快递取件码提示的开关（App 里的开关，默认开） */
+    private fun packageCodeOn(): Boolean =
+        overridePkg.get() ?: (loadPrefs()?.getBoolean("pkg_code_enabled", true) ?: true)
+
+    /**
+     * 当前该提示的取件码：Dock 只按它决定图标亮不亮，
+     * 码本身和短信内容只在展开的面板里出现。
+     */
+    internal fun packageCode(): com.lsp102.tapdock.PackageCodeCollector.Hit? {
+        if (!packageCodeOn()) return null
+        return PackageCodeSource.current()
+    }
+
+    /** 只留 10 秒，3 秒一轮的配置轮询兜不住这么短的窗口，到点单独刷一帧撤下 */
+    private val otpExpire = Runnable { applyContent() }
+
+    private fun scheduleOtpExpire() {
+        main.removeCallbacks(otpExpire)
+        main.postDelayed(otpExpire, OtpSource.TTL_MS)
+    }
+
+    /** App 侧 root 采集回来的游戏信息：`pkg|api|宽x高|时间戳`，空 = 还没采到 */
+    internal fun gameInfoRaw(): String = loadPrefs()?.getString("game_info", "") ?: ""
+
+    /** 点验证码：复制到剪贴板，省得在状态栏和短信之间来回抄 */
+    private fun copyOtp(context: Context) {
+        val code = OtpSource.peek() ?: return
+        try {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            cm?.setPrimaryClip(ClipData.newPlainText("code", code.text))
+            Toast.makeText(context, "验证码已复制：${code.text}", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] copy otp failed: $t")
+        }
+    }
+
+    /**
+     * 把 Dock 此刻真实渲染的内容回报给模块 App（首页顶部预览用）。
+     * 图标位取的是"这一帧真的画出来了"的那些，不是控制器认为该亮的；内容没变就不发。
+     */
+    private fun pushDockMirror(
+        context: Context,
+        states: BooleanArray,
+        badge: Int,
+        otp: String,
+        percent: Int?,
+        nyan: Boolean,
+        color: Int,
+        thumb: Boolean,
+    ) {
+        var bits = 0
+        states.forEachIndexed { i, on -> if (on && showsIcon(states, thumb, i)) bits = bits or (1 shl i) }
+        val pct = percent ?: -1
+        val sig = "$badge|$otp|$bits|$pct|$nyan|${color and 0xFFFFFF}|$thumb"
+        if (sig == lastMirrorSig) return
+        lastMirrorSig = sig
+        val A = com.lsp102.tapdock.HookSync.HookActions
+        val intent = Intent(A.DOCK_STATE)
+            .setPackage(MODULE_PKG)
+            .putExtra(A.EXTRA_M_BADGE, badge)
+            .putExtra(A.EXTRA_M_OTP, otp)
+            .putExtra(A.EXTRA_M_ICONS, bits)
+            .putExtra(A.EXTRA_M_PERCENT, pct)
+            .putExtra(A.EXTRA_M_NYAN, nyan)
+            .putExtra(A.EXTRA_M_COLOR, color)
+            .putExtra(A.EXTRA_M_THUMB, thumb)
+        try {
+            context.sendBroadcast(intent)
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] mirror broadcast failed: $t")
+        }
+    }
 
     /** 进度条是否走彩虹猫风格（App 里的开关） */
     internal fun nyanStyle(): Boolean =
@@ -1053,6 +1414,19 @@ object HookDock {
                         synchronized(activeNotifs) { activeNotifs.add(keyOf(sbn)) }
                     }
                     handleDownloadNotification(sbn)
+                    // 横幅接管：原生横幅已经被整批关掉，够格弹的那几条改画成 Dock 下方的卡片。
+                    // 双参重载会带 RankingMap（系统算好的重要度），单参调用时 args[1] 取不到就是 null
+                    if (!isGroupSummary(sbn) && notifCard()) {
+                        val ranking = param.args?.getOrNull(1) as? NotificationListenerService.RankingMap
+                        appContextRef?.get()?.let { NotificationCard.onPosted(it, sbn, ranking) }
+                    }
+                    // 验证码走同一条管线：不读短信数据库，只看已经弹出来的通知
+                    val before = OtpSource.peek()?.text
+                    OtpSource.onPosted(sbn)
+                    if (OtpSource.peek()?.text != before) {
+                        scheduleOtpExpire()
+                        refreshIcons()
+                    }
                 }
             })
             XposedBridge.hookAllMethods(cls, "onNotificationRemoved", object : XC_MethodHook() {
@@ -1060,6 +1434,9 @@ object HookDock {
                     val sbn = param.args?.firstOrNull() as? StatusBarNotification ?: return
                     synchronized(activeNotifs) { activeNotifs.remove(keyOf(sbn)) }
                     synchronized(downloadMap) { downloadMap.remove(sbn.packageName) }
+                    OtpSource.onRemoved(keyOf(sbn))
+                    // 通知被撤掉时卡片跟着收，免得留下一张已经不存在的通知
+                    NotificationCard.onRemoved(keyOf(sbn))
                     main.post {
                         lastPercent = null
                         applyContent()
@@ -1177,6 +1554,36 @@ object HookDock {
         a.start()
     }
 
+    /** App 里的宽度上限档位（dp，0 = 不限） */
+    private fun dockMaxDp(): Int =
+        overrideMaxW.get()
+            ?: (loadPrefs()?.getInt("dock_max_dp", DEFAULT_MAXW_DP) ?: DEFAULT_MAXW_DP)
+
+    /**
+     * 内容自然宽度超过上限时把 root 钉在上限，否则交回 WRAP_CONTENT。
+     * 用 UNSPECIFIED 量一次拿到的是"不算带权重子 view 拉伸"的自然宽度 —— 就是这条 pill 的实际宽度；
+     * 钉住之后多出来的收缩由进度条和时钟这两个 weight=1 的孩子吸收，图标 / 徽标 / 验证码不缩。
+     * 补间动画期间不插手，否则会和 animateDockWidth 抢 width。
+     */
+    private fun clampDockWidth(b: Binding, context: Context) {
+        val lp = b.root.layoutParams ?: return
+        val maxDp = dockMaxDp()
+        if (maxDp <= 0) {
+            if (lp.width != ViewGroup.LayoutParams.WRAP_CONTENT && b.anim == null) {
+                lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                b.root.layoutParams = lp
+            }
+            return
+        }
+        val cap = dp(context, maxDp).coerceAtLeast(b.minWidth)
+        b.root.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        val want = if (b.root.measuredWidth > cap) cap else ViewGroup.LayoutParams.WRAP_CONTENT
+        if (lp.width != want && b.anim == null) {
+            lp.width = want
+            b.root.layoutParams = lp
+        }
+    }
+
     /**
      * 由 ControlPanel 在同进程内调用。收起时要作废进度/图标缓存，
      * 否则展开期间没走过 applyContent，状态没变的那部分就永远刷不回来。
@@ -1184,11 +1591,29 @@ object HookDock {
     fun setPanelOpen(open: Boolean) {
         if (panelOpen == open) return
         panelOpen = open
+        if (open) {
+            // 面板要占住屏幕顶部，通知卡片先让开
+            NotificationCard.onPanelOpen()
+        }
         if (!open) {
+            // 面板收起：队列里憋着的下一条补上
+            NotificationCard.onPanelClosed()
             lastStates = null
             lastPercent = null
         }
         main.post { applyContent() }
+    }
+
+    /** 控制中心此刻是否展开（通知卡片用它决定要不要憋着） */
+    internal fun panelOpenNow(): Boolean = panelOpen
+
+    /** Dock 在屏幕上的矩形 [left, top, right, bottom]；还没注入或还没量出来返回 null */
+    internal fun dockScreenRect(): IntArray? {
+        val root = synchronized(bindings) { bindings.firstOrNull() }?.root ?: return null
+        if (root.width <= 0 || root.height <= 0) return null
+        val loc = IntArray(2)
+        root.getLocationOnScreen(loc)
+        return intArrayOf(loc[0], loc[1], loc[0] + root.width, loc[1] + root.height)
     }
 
     private fun rebuildAll() {
@@ -1253,6 +1678,8 @@ object HookDock {
         vpnActive(context),
         PrivacyMonitor.camera,
         PrivacyMonitor.microphone,
+        packageCode() != null,
+        HotspotSource.enabled(context),
     )
 
     private fun connectivity(ctx: Context): ConnectivityManager? =
@@ -1264,6 +1691,29 @@ object HookDock {
             ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
     } catch (_: Throwable) {
         false
+    }
+
+    /**
+     * WiFi 图标该画第几格（WIFI_LEVEL_ICONS 下标）。
+     * 关着 / 没关联 / 读不到都回落到 0 = 完整扇形，不让 Dock 上出现空白格。
+     */
+    @Suppress("DEPRECATION")
+    private fun wifiIconLevel(ctx: Context): Int {
+        val wm = try {
+            ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        } catch (_: Throwable) {
+            null
+        } ?: return 0
+        if (!wm.isWifiEnabled) return 0
+        // rssi 不在定位脱敏的字段里（SSID 才是），这里只取信号
+        val rssi = try {
+            wm.connectionInfo?.rssi ?: Int.MIN_VALUE
+        } catch (_: Throwable) {
+            return 0
+        }
+        if (rssi <= -110) return 0
+        // 4 格档位给 0..3，图标从第 1 格起画，第 0 格留给兜底
+        return WifiManager.calculateSignalLevel(rssi, WIFI_LEVEL_ICONS.size - 1) + 1
     }
 
     private fun vpnActive(ctx: Context): Boolean = try {
@@ -1353,7 +1803,7 @@ object HookDock {
             } catch (_: Throwable) {
                 null
             }
-            XposedBridge.log("[TapDock] status bar icons (wifi/bt/location/vpn) hidden")
+            XposedBridge.log("[TapDock] status bar icons (wifi/bt/location/vpn/hotspot) hidden")
         } catch (t: Throwable) {
             XposedBridge.log("[TapDock] hide status bar icons failed: $t")
         }

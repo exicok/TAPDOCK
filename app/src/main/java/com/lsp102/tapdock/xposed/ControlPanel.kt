@@ -1,6 +1,9 @@
 package com.lsp102.tapdock.xposed
 
 import android.bluetooth.BluetoothAdapter
+import android.app.ActivityManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -9,6 +12,8 @@ import android.graphics.BitmapFactory
 import android.net.TrafficStats
 import android.net.wifi.WifiManager as WifiManagerAlias
 import android.graphics.Rect
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.Region
 import android.graphics.RegionIterator
 import android.graphics.drawable.BitmapDrawable
@@ -40,9 +45,13 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.doOnPreDraw
+import com.lsp102.tapdock.CardIds
 import com.lsp102.tapdock.CardSpec
+import com.lsp102.tapdock.PackageCodeCollector
 import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Proxy
+import java.text.SimpleDateFormat
+import java.util.Locale
 import java.util.concurrent.Executor
 
 /**
@@ -75,6 +84,17 @@ object ControlPanel {
     /** 面板与屏幕左右边缘各留出的间距 */
     private const val SIDE_MARGIN_DP = 16
 
+    /**
+     * 一张卡片至少要多宽才不挤。列数按可用宽度除它算，横屏自然就从 2 列涨到 4 列 ——
+     * 对齐 LOS 23.2 的做法：它的 shade 不封顶宽度，横屏把
+     * `quick_settings_infinite_grid_num_columns` 从 4 直接翻到 8（行数 4 → 2）。
+     * 我们的卡片带标题和副标题，不是方块 tile，所以取它一半的密度。
+     */
+    private const val MIN_CARD_WIDTH_DP = 200
+
+    /** 列数上限：再多一行就没人能点准了 */
+    private const val MAX_COLS = 4
+
     /** 面板距屏幕顶部（状态栏下方）的间距 */
     private const val TOP_MARGIN_DP = 16
 
@@ -103,6 +123,9 @@ object ControlPanel {
     /** 面板内的音乐控制卡片引用（无媒体会话时为 null） */
     private var musicRefs: MusicRefs? = null
 
+    /** 取件码卡片：建面板时就造好，没码整块 GONE，不靠重建面板才能出现 */
+    private var pkgRefs: PkgRefs? = null
+
     /** 各卡片的状态回读，面板开着时每秒一次 */
     private var connectRefresh: List<() -> Unit> = emptyList()
 
@@ -111,6 +134,9 @@ object ControlPanel {
 
     /** 卡片顺序（App 里拖出来，经 HookDock 的三级配置通道下发） */
     private var cardDefs: List<TileDef> = emptyList()
+
+    /** 本次展开用几列，由面板可用宽度决定（见 show 里的计算） */
+    private var panelCols = 2
 
     /** 多进度显示区：下载按应用各占一行，行数随并发下载数变化 */
     private var progressBox: LinearLayout? = null
@@ -128,9 +154,17 @@ object ControlPanel {
 
     private var statusRefs: StatusRefs? = null
 
-    /** 状态区的 CPU 全核心图（App 里开了才有） */
-    private var cpuChart: CpuChartView? = null
-    private var cpuLogged = false
+    /** 状态区的资源占用图（App 里开了才有）：CPU 每核一条，GPU / 内存各一条 */
+    private class BarsRow(val row: LinearLayout, val bars: UsageBarsView, val value: TextView?)
+
+    private var cpuRow: BarsRow? = null
+    private var gpuRow: BarsRow? = null
+    private var memRow: BarsRow? = null
+    private var zramRow: BarsRow? = null
+
+    /** 状态区里的"游戏 · 图形API · 渲染分辨率"一行 */
+    private var gameInfo: TextView? = null
+    private var barsLogged = false
 
     /** TrafficStats 给的是开机累计值，速率要自己按两次采样的间隔差分 */
     private var trafficAt = 0L
@@ -175,12 +209,21 @@ object ControlPanel {
         var controller: MediaController? = null
     }
 
+    private class PkgRefs(
+        val card: LinearLayout,
+        val code: TextView,
+        val meta: TextView,
+        val body: TextView,
+        val taken: TextView,
+    )
+
     private val musicTick = object : Runnable {
         override fun run() {
             val ctx = panelView?.context
             try {
                 refreshMusicCard()
                 if (ctx != null) {
+                    refreshPackageCard(ctx)
                     refreshProgressRows(ctx)
                     refreshStatus(ctx)
                 }
@@ -208,10 +251,19 @@ object ControlPanel {
     private var tmStop: java.lang.reflect.Method? = null
     private var tmWifiType = 0
 
+    /**
+     * 面板里的一张卡片：原生开关，或转发给 SystemUI 磁贴本体的代理卡片。
+     * label / sub / isOn 都是即时读取的函数 —— 系统磁贴的标签和状态要跟着广播回来的快照走。
+     */
     private class TileDef(
-        val spec: CardSpec,
+        val id: String,
+        val iconRes: Int,
+        val label: () -> String,
+        /** 副标题拿到当前开关状态，省得一帧里读两遍系统 */
+        val sub: (Boolean) -> String,
         val isOn: () -> Boolean,
-        val setOn: (Boolean) -> Unit,
+        val toggle: () -> Unit,
+        val longPress: () -> Unit,
     )
 
     /** 一套配色，拖动换序重建网格时整批卡片共用 */
@@ -261,11 +313,16 @@ object ControlPanel {
         HookDock.setPanelOpen(false)
         cancelBackdropBlurRetry()
         musicRefs = null
+        pkgRefs = null
         progressBox = null
         progressRows.clear()
         statusRefs = null
-        cpuChart = null
-        cpuLogged = false
+        cpuRow = null
+        gpuRow = null
+        memRow = null
+        zramRow = null
+        gameInfo = null
+        barsLogged = false
         trafficAt = 0L
         backdropBlurActive = false
 
@@ -293,8 +350,13 @@ object ControlPanel {
             val panel = buildPanel(ctx)
 
             val sideMargin = dp(ctx, SIDE_MARGIN_DP)
+            val metrics = ctx.resources.displayMetrics
+            // 不封顶宽度：跟 LOS 的 shade 一样铺满可用区域，多出来的宽度换成列数而不是拉长卡片
+            val width = metrics.widthPixels - sideMargin * 2
+            panelCols = (width / metrics.density / MIN_CARD_WIDTH_DP).toInt()
+                .coerceIn(2, MAX_COLS)
             val lp = WindowManager.LayoutParams(
-                ctx.resources.displayMetrics.widthPixels - sideMargin * 2,
+                width,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -409,44 +471,96 @@ object ControlPanel {
         // 音乐控制卡片（无正在播放的媒体会话时自动隐藏）
         addMusicCard(box, night, accent)
 
+        // 取件码卡片（未读短信里有码才出现；Dock 上只亮图标）
+        addPackageCard(box, night)
+
         // 8 个开关统一成同一种卡片：双列网格，顺序由 App 里的排序界面决定
-        val bySpec = CardSpec.values().associateWith { spec ->
+        fun nativeCard(
+            spec: CardSpec,
+            isOn: () -> Boolean,
+            setOn: (Boolean) -> Unit,
+        ) = TileDef(
+            id = spec.id,
+            iconRes = spec.iconRes,
+            label = { spec.label },
+            sub = { on -> if (on) "已开启" else "已关闭" },
+            isOn = isOn,
+            toggle = { setOn(!isOn()) },
+            longPress = { spec.openSettings(ctx) },
+        )
+        val byId = CardSpec.values().associateBy({ it.id }, { spec ->
             when (spec) {
-                CardSpec.BT -> TileDef(spec, { bluetoothOn() }, { setBluetooth(it) })
-                CardSpec.WIFI -> TileDef(spec, { wifiOn(ctx) }, { setWifi(ctx, it) })
-                CardSpec.HOTSPOT -> TileDef(spec, { hotspotOn(ctx) }, { setHotspot(it) })
-                CardSpec.DATA -> TileDef(spec, { mobileDataOn(ctx) }, { setMobileData(ctx, it) })
-                CardSpec.LOCATION -> TileDef(spec, { locationOn(ctx) }, { setLocation(ctx, it) })
-                CardSpec.TORCH -> TileDef(spec, { torchOn }, { setTorch(ctx, it) })
-                CardSpec.CAMERA -> TileDef(
+                CardSpec.BT -> nativeCard(spec, { bluetoothOn() }, { setBluetooth(it) })
+                CardSpec.WIFI -> nativeCard(spec, { wifiOn(ctx) }, { setWifi(ctx, it) })
+                CardSpec.HOTSPOT -> nativeCard(spec, { hotspotOn(ctx) }, { setHotspot(it) })
+                CardSpec.DATA -> nativeCard(spec, { mobileDataOn(ctx) }, { setMobileData(ctx, it) })
+                CardSpec.LOCATION -> nativeCard(spec, { locationOn(ctx) }, { setLocation(ctx, it) })
+                CardSpec.TORCH -> nativeCard(spec, { torchOn }, { setTorch(ctx, it) })
+                CardSpec.CAMERA -> nativeCard(
                     spec, { sensorUsable(SENSOR_CAMERA) }, { setSensorPrivacy(SENSOR_CAMERA, !it) }
                 )
-                CardSpec.MIC -> TileDef(
+                CardSpec.MIC -> nativeCard(
                     spec, { sensorUsable(SENSOR_MICROPHONE) },
                     { setSensorPrivacy(SENSOR_MICROPHONE, !it) }
                 )
             }
+        })
+        // 顺序表里原生 id 和 sys: id 是混排的，逐条解析；没列到的原生卡片按声明顺序补在后面
+        val rest = LinkedHashMap(byId)
+        val defs = ArrayList<TileDef>(rest.size + 4)
+        for (id in HookDock.cardOrder()) {
+            if (CardIds.isSys(id)) defs.add(sysCard(ctx, id)) else rest.remove(id)?.let { defs.add(it) }
         }
-        cardDefs = CardSpec.ordered(HookDock.cardOrder()).map { bySpec.getValue(it) }
-        addCardGrid(
-            box,
-            CardStyle(accent, inactiveBg, chipOff, iconOff, contentOn, contentOff),
-        )
-
-        // 状态区：控制区和进度区之间的一条实时读数
-        addStatusSection(box, night, contentOff, accent)
-
-        // 进度区：控制区下方的独立区域（下载 / 音乐 / 充电，没有进度的源自动收起）
-        addProgressSection(box, night, accent)
+        defs.addAll(rest.values)
+        cardDefs = defs
+        val style = CardStyle(accent, inactiveBg, chipOff, iconOff, contentOn, contentOff)
+        if (ctx.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            // 横屏照 LOS 的 shade 分栏：左边控制卡片，右边状态与进度
+            val split = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+            val left = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+            val right = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+            split.addView(
+                left,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 3f)
+            )
+            split.addView(
+                right,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f).apply {
+                    marginStart = dp(ctx, 12)
+                }
+            )
+            // 左栏只拿到面板的 3/5，再排四列卡片就挤了
+            panelCols = 2
+            addCardGrid(left, style)
+            addStatusSection(right, night, contentOff, accent)
+            addProgressSection(right, night, accent)
+            box.addView(
+                split,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        } else {
+            addCardGrid(box, style)
+            addStatusSection(box, night, contentOff, accent)
+            addProgressSection(box, night, accent)
+        }
         return box
     }
 
-    /** 双列网格：按 cardDefs（App 里拖出来的顺序）铺卡片 */
+    /** 系统磁贴的快照一到就回读卡片，不必等下一秒的 tick */
+    internal fun refreshCards() {
+        connectRefresh.forEach { it() }
+    }
+
+    /** 网格：按 cardDefs（App 里拖出来的顺序）铺卡片，列数随面板宽度走 */
     private fun addCardGrid(parent: LinearLayout, style: CardStyle) {
         val ctx = parent.context
         val refreshers = mutableListOf<() -> Unit>()
+        val cols = panelCols.coerceAtLeast(1)
 
-        cardDefs.chunked(2).forEach { rowDefs ->
+        cardDefs.chunked(cols).forEach { rowDefs ->
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -459,7 +573,8 @@ object ControlPanel {
                     }
                 )
             }
-            if (rowDefs.size == 1) {
+            // 最后一行不满时补空位，卡片宽度才和上面几行一致
+            repeat(cols - rowDefs.size) {
                 row.addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
             }
             parent.addView(
@@ -500,12 +615,12 @@ object ControlPanel {
             val pad = (chipSize - dp(ctx, 19)) / 2
             setPadding(pad, pad, pad, pad)
             // 必须走模块资源上下文：SystemUI 资源表里没有这些 ID
-            ModuleRes.drawable(ctx, def.spec.iconRes)?.let { setImageDrawable(it) }
+            ModuleRes.drawable(ctx, def.iconRes)?.let { setImageDrawable(it) }
         }
         card.addView(icon, LinearLayout.LayoutParams(chipSize, chipSize))
 
         val title = TextView(ctx).apply {
-            text = def.spec.label
+            text = def.label()
             textSize = 13f
             maxLines = 1
             setTextColor(style.contentOff)
@@ -537,40 +652,62 @@ object ControlPanel {
                 setColor(if (on) style.accent else style.chipOff)
             }
             icon.setColorFilter(if (on) style.contentOn else style.iconOff)
-            sub.text = if (on) "已开启" else "已关闭"
+            title.text = def.label()
+            sub.text = try {
+                def.sub(on)
+            } catch (_: Throwable) {
+                ""
+            }
+            sub.visibility = if (sub.text.isNullOrEmpty()) View.GONE else View.VISIBLE
         }
         card.setOnClickListener {
             if (closing) return@setOnClickListener
-            val cur = try {
-                def.isOn()
-            } catch (_: Throwable) {
-                false
-            }
             try {
-                def.setOn(!cur)
+                def.toggle()
             } catch (t: Throwable) {
-                XposedBridge.log("[TapDock] toggle ${def.spec.label} failed: $t")
+                XposedBridge.log("[TapDock] toggle ${def.id} failed: $t")
                 val msg = ModuleRes.string(
                     ctx, com.lsp102.tapdock.R.string.toast_toggle_failed
                 ) ?: "该开关不可用（权限不足或设备不支持）"
                 Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
             }
-            // 热点是异步起的，这里读到的多半还是旧值；每秒一次的 tick 会把它纠正过来
+            // 磁贴状态是异步回报的，这里先按当前读数刷一遍，下一秒的 tick 会校准
             refresh()
         }
         card.setOnLongClickListener {
             if (closing) return@setOnLongClickListener false
             // 面板自己就是 overlay 窗口，不先收掉它会压在设置页上面
             dismiss()
-            if (!def.spec.openSettings(ctx)) {
-                XposedBridge.log("[TapDock] no settings page for ${def.spec.label}")
-            }
+            def.longPress()
             true
         }
         refresh()
         refreshers += refresh
         return card
     }
+
+    /**
+     * 代理卡片：显示 SystemUI 回报的磁贴快照，点击和长按都发回引擎侧执行
+     * （长按走磁贴自己的 longClick，和系统 QS 的长按行为一致）。
+     */
+    private fun sysCard(ctx: Context, id: String) = TileDef(
+        id = id,
+        iconRes = com.lsp102.tapdock.R.drawable.ic_tile_sys,
+        label = { SystemTiles.snapshot(id).label },
+        sub = { on ->
+            val snap = SystemTiles.snapshot(id)
+            snap.sub.ifEmpty {
+                when {
+                    !snap.available -> "不可用"
+                    on -> "已开启"
+                    else -> "已关闭"
+                }
+            }
+        },
+        isOn = { SystemTiles.snapshot(id).on },
+        toggle = { SystemTiles.requestClick(ctx, id, false) },
+        longPress = { SystemTiles.requestClick(ctx, id, true) },
+    )
 
 
     /** 读取 SystemUI 主题的强调色（与 ROM 快捷设置磁贴的颜色一致） */
@@ -843,11 +980,6 @@ object ControlPanel {
         val root = backdrop.rootView ?: return false
         if (root.width <= 0 || root.height <= 0) return false
         return try {
-            val viewRootImpl = root.call("getViewRootImpl") ?: return false
-            val sc = viewRootImpl.call("getSurfaceControl") as? android.view.SurfaceControl
-                ?: return false
-            if (!sc.isValid) return false
-
             val rootLoc = IntArray(2)
             root.getLocationOnScreen(rootLoc)
             val radiusPx = dp(backdrop.context, BLUR_DP)
@@ -872,7 +1004,7 @@ object ControlPanel {
                         Rect(dock.right - corner, top, dock.right, top + corner),
                         Rect(left, dock.bottom - corner, left + corner, dock.bottom),
                         Rect(dock.right - corner, dock.bottom - corner, dock.right, dock.bottom),
-                    ).forEach { regions += blurRegion(radiusPx, it) }
+                    ).forEach { regions += blurRegion(radiusPx, it) ?: return false }
                 }
             }
 
@@ -882,36 +1014,17 @@ object ControlPanel {
             }
             val iterator = RegionIterator(visible)
             val rect = Rect()
-            while (iterator.next(rect)) regions += blurRegion(radiusPx, rect)
-            val blurRegions = regions.toTypedArray()
-
-            val transactionClass = Class.forName("android.view.SurfaceControl\$Transaction")
-            val transaction = transactionClass.getConstructor().newInstance()
-            val setBlurRegions = transactionClass.methods.firstOrNull {
-                it.name == "setBlurRegions" && it.parameterCount == 2
-            } ?: throw NoSuchMethodException("SurfaceControl.Transaction.setBlurRegions")
-            setBlurRegions.invoke(transaction, sc, blurRegions)
-
-            val builder = Class.forName(
-                "android.view.SyncRtSurfaceTransactionApplier\$SurfaceParams\$Builder"
-            ).getConstructor(android.view.SurfaceControl::class.java).newInstance(sc)
-            builder.require("withMergeTransaction", transaction)
-            builder.require("withBackgroundBlurRadius", radiusPx)
-            builder.call("withBackgroundBlurScale", 1f)
-            builder.call("withOpaque", false)
-            val params = builder.require("build") ?: return false
-
-            val applier = Class.forName("android.view.SyncRtSurfaceTransactionApplier")
-                .getConstructor(View::class.java).newInstance(root)
-            val arr = java.lang.reflect.Array.newInstance(params.javaClass, 1)
-            java.lang.reflect.Array.set(arr, 0, params)
-            applier.require("scheduleApply", arr)
-
-            if (!backdropBlurActive) {
-                XposedBridge.log("[TapDock] backdrop region blur applied (${regions.size} regions)")
+            while (iterator.next(rect)) {
+                regions += blurRegion(radiusPx, rect) ?: return false
             }
-            backdropBlurActive = true
-            true
+            val applied = applyRegionBlur(backdrop, regions.toTypedArray(), radiusPx)
+            if (applied) {
+                if (!backdropBlurActive) {
+                    XposedBridge.log("[TapDock] backdrop region blur applied (${regions.size} regions)")
+                }
+                backdropBlurActive = true
+            }
+            applied
         } catch (t: Throwable) {
             if (logFailure && !backdropBlurActive) {
                 XposedBridge.log("[TapDock] backdrop region blur unavailable: $t")
@@ -921,18 +1034,106 @@ object ControlPanel {
     }
 
     /**
-     * SurfaceFlinger 的模糊区布局（frameworks/native ui/BlurRegion，Android 16 每个区 10 个 float）：
-     * 模糊半径、不透明度、left/top/right/bottom，最后是左上/右上/左下/右下四个圆角半径。
+     * 把 [regions] 圈出的部分在 [target] 所在窗口身后糊掉：SystemUI 自己 BlurUtils 那条路
+     * （setBlurRegions + backgroundBlurRadius，经 RenderThread 随帧生效）。
+     * regions 传空数组、radiusPx 传 0 就是把之前的模糊撤掉。
      */
-    private fun blurRegion(radiusPx: Int, rect: Rect) = floatArrayOf(
-        radiusPx.toFloat(),
-        1f,
-        rect.left.toFloat(),
-        rect.top.toFloat(),
-        rect.right.toFloat(),
-        rect.bottom.toFloat(),
-        0f, 0f, 0f, 0f,
-    )
+    private fun applyRegionBlur(
+        target: View,
+        regions: Array<FloatArray>,
+        radiusPx: Int,
+    ): Boolean {
+        val root = target.rootView ?: return false
+        val viewRootImpl = root.call("getViewRootImpl") ?: return false
+        val sc = viewRootImpl.call("getSurfaceControl") as? android.view.SurfaceControl
+            ?: return false
+        if (!sc.isValid) return false
+
+        val transactionClass = Class.forName("android.view.SurfaceControl\$Transaction")
+        val transaction = transactionClass.getConstructor().newInstance()
+        val setBlurRegions = transactionClass.methods.firstOrNull {
+            it.name == "setBlurRegions" && it.parameterCount == 2
+        } ?: throw NoSuchMethodException("SurfaceControl.Transaction.setBlurRegions")
+        setBlurRegions.invoke(transaction, sc, regions)
+
+        val builder = Class.forName(
+            "android.view.SyncRtSurfaceTransactionApplier\$SurfaceParams\$Builder"
+        ).getConstructor(android.view.SurfaceControl::class.java).newInstance(sc)
+        builder.require("withMergeTransaction", transaction)
+        builder.require("withBackgroundBlurRadius", radiusPx)
+        builder.call("withBackgroundBlurScale", 1f)
+        builder.call("withOpaque", false)
+        val params = builder.require("build") ?: return false
+
+        val applier = Class.forName("android.view.SyncRtSurfaceTransactionApplier")
+            .getConstructor(View::class.java).newInstance(root)
+        val arr = java.lang.reflect.Array.newInstance(params.javaClass, 1)
+        java.lang.reflect.Array.set(arr, 0, params)
+        applier.require("scheduleApply", arr)
+        return true
+    }
+
+    /**
+     * SurfaceFlinger 的模糊区数组各版本长度不同：Android 16 及以前每个区 10 个 float，
+     * Android 17 起 14 个（四角各带 x/y 两个半径）。长度给短了 native 不抛可捕获的异常，
+     * 而是直接 abort 掉整个 SystemUI，所以优先让平台的 BlurRegion 自己生成数组；
+     * 只有确认是老版本（有 RoundedRectBlurRegion 之前的 10-float 格式）才手搓。
+     */
+    private fun blurRegion(radiusPx: Int, rect: Rect): FloatArray? =
+        platformBlurRegion(radiusPx, rect) ?: legacyBlurRegion(radiusPx, rect)
+
+    /** RectF + 8 个角半径 + 不透明度 + 模糊半径（平台这个构造器 alpha 在前），缩放 1、偏移 0 即原样输出 */
+    private fun platformBlurRegion(radiusPx: Int, rect: Rect): FloatArray? {
+        val ctor = blurRegionCtor ?: return null
+        val toArray = blurRegionToArray ?: return null
+        return try {
+            val region = ctor.newInstance(
+                RectF(
+                    rect.left.toFloat(), rect.top.toFloat(),
+                    rect.right.toFloat(), rect.bottom.toFloat()
+                ),
+                FloatArray(8),
+                1f, radiusPx.toFloat()
+            )
+            toArray.invoke(region, 0, 0, 1f, 1f) as? FloatArray
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /** 模糊半径、不透明度、left/top/right/bottom，最后是四角的圆角半径 */
+    private fun legacyBlurRegion(radiusPx: Int, rect: Rect): FloatArray? {
+        if (Build.VERSION.SDK_INT >= 37) return null
+        return floatArrayOf(
+            radiusPx.toFloat(),
+            1f,
+            rect.left.toFloat(),
+            rect.top.toFloat(),
+            rect.right.toFloat(),
+            rect.bottom.toFloat(),
+            0f, 0f, 0f, 0f,
+        )
+    }
+
+    private val blurRegionCtor by lazy(LazyThreadSafetyMode.NONE) {
+        try {
+            Class.forName("android.view.RoundedRectBlurRegion").getConstructor(
+                RectF::class.java, FloatArray::class.java,
+                Float::class.javaPrimitiveType, Float::class.javaPrimitiveType
+            )
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    private val blurRegionToArray by lazy(LazyThreadSafetyMode.NONE) {
+        try {
+            Class.forName("android.view.RoundedRectBlurRegion").methods
+                .firstOrNull { it.name == "toFloatArray" && it.parameterCount == 4 }
+        } catch (t: Throwable) {
+            null
+        }
+    }
 
     /** @hide API 的签名各版本有出入，按方法名 + 参数个数匹配 */
     private fun Any.call(name: String, vararg args: Any?): Any? =
@@ -987,7 +1188,31 @@ object ControlPanel {
             )
         )
         statusRefs = StatusRefs(refs[0], refs[1], refs[2], refs[3], refs[4])
-        cpuChart = if (HookDock.cpuChart()) addCpuRow(box, ctx, night, content, accent) else null
+        // 游戏信息行：只有前台是游戏且 Game SDK 报得出数据时才占一行
+        val game = TextView(ctx).apply {
+            textSize = 11f
+            maxLines = 1
+            gravity = Gravity.CENTER
+            setTextColor(accent)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            visibility = View.GONE
+        }
+        box.addView(
+            game,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(ctx, 2) }
+        )
+        gameInfo = game
+        if (HookDock.cpuChart()) {
+            val cores = Runtime.getRuntime().availableProcessors()
+            cpuRow = addBarsRow(box, ctx, "CPU", cores, true, false, night, content, accent)
+            gpuRow = addBarsRow(box, ctx, "GPU", 1, false, true, night, content, accent)
+            memRow = addBarsRow(box, ctx, "内存", 1, false, true, night, content, accent)
+            zramRow = addBarsRow(box, ctx, "zram", 1, false, true, night, content, accent)
+            // 重新起一段：不然第一次读数会把"面板关着的这段时间"平均进来
+            SysStatSource.reset()
+        }
         parent.addView(
             box,
             LinearLayout.LayoutParams(
@@ -995,55 +1220,85 @@ object ControlPanel {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(ctx, 6) }
         )
-        if (cpuChart != null) {
-            // 重新起一段：不然第一次读数会把"面板关着的这段时间"平均进来
-            CpuSource.reset()
-        }
         // 建面板时就取一次值，和进度区一样跟着控制中心同帧出现
         refreshStatus(ctx)
         XposedBridge.log("[TapDock] status area: " + refs.joinToString(" | ") { it.text.toString() })
     }
 
-    /** 状态区的 CPU 那一行：标签 + 占满剩余宽度的全核心竖柱，返回画布好每秒喂数据 */
-    private fun addCpuRow(
+    /**
+     * 状态区里的一条资源图：标签 + 横条 +（可选）右侧数值。
+     * `rows` 决定画布高度 —— CPU 传核心数（每核一条，左边带序号），GPU / 内存传 1。
+     */
+    private fun addBarsRow(
         box: LinearLayout,
         ctx: Context,
+        title: String,
+        rows: Int,
+        showIndex: Boolean,
+        withValue: Boolean,
         night: Boolean,
         content: Int,
         accent: Int,
-    ): CpuChartView {
-        val chart = CpuChartView(ctx).apply {
-            setColors(if (night) 0x33FFFFFF else 0x1F000000, accent)
+    ): BarsRow {
+        val muted = content and 0x00FFFFFF or 0xB3000000.toInt()
+        val bars = UsageBarsView(ctx).apply {
+            this.showIndex = showIndex
+            setColors(
+                if (night) 0x33FFFFFF else 0x1F000000,
+                accent,
+                muted
+            )
         }
-        val label = TextView(ctx).apply {
-            text = "CPU"
-            textSize = 11f
-            maxLines = 1
-            setTextColor(content and 0x00FFFFFF or 0xB3000000.toInt())
-        }
-        val cpuRow = LinearLayout(ctx).apply {
+        // 单条给足高度好看，八条就得压扁才不占地方
+        val barH = dp(ctx, if (rows == 1) 8 else 5)
+        val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        cpuRow.addView(
-            label,
+        row.addView(
+            TextView(ctx).apply {
+                text = title
+                textSize = 11f
+                maxLines = 1
+                setTextColor(muted)
+            },
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
-        cpuRow.addView(
-            chart,
-            LinearLayout.LayoutParams(0, dp(ctx, 16), 1f).apply { marginStart = dp(ctx, 6) }
+        row.addView(
+            bars,
+            LinearLayout.LayoutParams(
+                0,
+                barH * rows + dp(ctx, 2) * (rows - 1),
+                1f
+            ).apply { marginStart = dp(ctx, 6) }
         )
+        val value = if (withValue) {
+            TextView(ctx).apply {
+                textSize = 11f
+                maxLines = 1
+                gravity = Gravity.END
+                setTextColor(content)
+            }.also {
+                row.addView(
+                    it,
+                    LinearLayout.LayoutParams(dp(ctx, 34), LinearLayout.LayoutParams.WRAP_CONTENT)
+                        .apply { marginStart = dp(ctx, 6) }
+                )
+            }
+        } else {
+            null
+        }
         box.addView(
-            cpuRow,
+            row,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(ctx, 6) }
         )
-        return chart
+        return BarsRow(row, bars, value)
     }
 
     private fun refreshStatus(ctx: Context) {
@@ -1054,15 +1309,71 @@ object ControlPanel {
         refs.traffic.text = trafficText()
         // 一次 tick 只取一次：sample() 会消费掉这一段的帧数窗口
         refs.fps.text = "帧率 ${FpsMonitor.sample()}"
-        val view = cpuChart ?: return
-        val cores = CpuSource.sample()
-        view.setValues(cores)
-        if (!cpuLogged && cores.isNotEmpty()) {
-            cpuLogged = true
-            XposedBridge.log(
-                "[TapDock] cpu ${cores.size} cores: " + cores.joinToString(" ") { "${it.toInt()}%" }
-            )
+        gameInfo?.let { tv ->
+            GameInfoSource.refresh(ctx)
+            val gi = GameInfoSource.peek(ctx)
+            if (gi == null) {
+                tv.visibility = View.GONE
+            } else {
+                tv.text = "游戏 ${gi.label} · ${gi.api} · ${gi.resolution}"
+                tv.visibility = View.VISIBLE
+            }
         }
+        refreshBars(ctx)
+    }
+
+    /** 五张资源图各自的取数 + 显隐；数据源读不到就整行收起，不留一条 0% 的假条 */
+    private fun refreshBars(ctx: Context) {
+        // 一次 tick 只发一次 root 采集请求：CPU / GPU / zram 同属那一帧
+        val st = SysStatSource.poll(ctx)
+        cpuRow?.let { r ->
+            if (st.cores.isEmpty()) {
+                r.row.visibility = View.GONE
+            } else {
+                r.bars.setValues(st.cores)
+                r.row.visibility = View.VISIBLE
+                if (!barsLogged) {
+                    barsLogged = true
+                    XposedBridge.log(
+                        "[TapDock] status bars: cores=${st.cores.size} " +
+                            st.cores.joinToString(" ") { "${it.toInt()}%" }
+                    )
+                }
+            }
+        }
+        gpuRow?.let { r ->
+            r.row.visibility = if (st.gpu == null) View.GONE else View.VISIBLE
+            r.bars.setValues(floatArrayOf((st.gpu ?: 0).toFloat()))
+            r.value?.text = st.gpu?.let { "$it%" } ?: "--"
+        }
+        memRow?.let { r ->
+            val mem = memoryUsage(ctx)
+            if (mem == null) {
+                r.row.visibility = View.GONE
+            } else {
+                r.bars.setValues(floatArrayOf(mem.first))
+                r.value?.text = mem.second
+                r.row.visibility = View.VISIBLE
+            }
+        }
+        zramRow?.let { r ->
+            val zram = st.zram ?: run { r.row.visibility = View.GONE; return@let }
+            r.bars.setValues(floatArrayOf(zram.percent))
+            // 条已经是占用比例，数字这格报容量
+            r.value?.text = SysStatSource.fmt(zram.totalKb)
+            r.row.visibility = View.VISIBLE
+        }
+    }
+
+    /** 内存：`ActivityManager.MemoryInfo` 是公开 API、不要权限；used = total − avail */
+    private fun memoryUsage(ctx: Context): Pair<Float, String>? {
+        val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
+        val info = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(info)
+        val total = info.totalMem
+        if (total <= 0L) return null
+        val used = total - info.availMem
+        return ((used * 100f) / total) to "%.1fG".format(used / 1_073_741_824f)
     }
 
     /** 0~4 格，取 @hide 的 SignalStrength.getLevel()；无权限或无服务时留空而不是骗人 */
@@ -1287,6 +1598,142 @@ object ControlPanel {
         return list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
             ?: list.firstOrNull()
     }
+
+    /**
+     * 取件码卡片：Dock 上只有一颗图标，码、发件方和短信原文都放这儿。
+     * 建面板时就造好并 GONE，面板开着时来新码也能直接出现，不用重开面板。
+     */
+    private fun addPackageCard(box: LinearLayout, night: Boolean) {
+        val ctx = box.context
+        val cardBg = if (night) 0xFF26262C.toInt() else 0xFFE4E6EC.toInt()
+        val titleColor = if (night) 0xFFEDEDED.toInt() else 0xFF1B1B1F.toInt()
+        val subColor = if (night) 0xFF9A9AA5.toInt() else 0xFF5A5C63.toInt()
+        val chipBg = if (night) 0xFF3A3B40.toInt() else 0xFFCFD2D9.toInt()
+
+        val card = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                setColor(cardBg)
+                cornerRadius = dp(ctx, 18).toFloat()
+            }
+            setPadding(dp(ctx, 12), dp(ctx, 10), dp(ctx, 12), dp(ctx, 10))
+            visibility = View.GONE
+        }
+        val icon = ImageView(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(ctx, 26), dp(ctx, 26))
+            ModuleRes.drawable(ctx, com.lsp102.tapdock.R.drawable.ic_row_package)
+                ?.let { setImageDrawable(it) }
+            setColorFilter(subColor)
+        }
+        val code = TextView(ctx).apply {
+            textSize = 21f
+            setTextColor(titleColor)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            maxLines = 1
+        }
+        val meta = TextView(ctx).apply {
+            textSize = 11f
+            setTextColor(subColor)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        val texts = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = dp(ctx, 10) }
+        }
+        texts.addView(code)
+        texts.addView(meta)
+        val taken = TextView(ctx).apply {
+            text = "已取"
+            textSize = 12f
+            setTextColor(titleColor)
+            gravity = Gravity.CENTER
+            setPadding(dp(ctx, 10), dp(ctx, 5), dp(ctx, 10), dp(ctx, 5))
+            background = GradientDrawable().apply {
+                setColor(chipBg)
+                cornerRadius = dp(ctx, 9).toFloat()
+            }
+        }
+        val top = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        top.addView(icon)
+        top.addView(texts)
+        top.addView(taken)
+        val body = TextView(ctx).apply {
+            textSize = 11f
+            setTextColor(subColor)
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        card.addView(top)
+        card.addView(
+            body,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(ctx, 4) }
+        )
+        // 点整张卡片复制取件码，省得照着抄；"已取"那颗单独处理，别跟着复制
+        card.setOnClickListener {
+            if (closing) return@setOnClickListener
+            val hit = HookDock.packageCode() ?: return@setOnClickListener
+            copyPackageCode(ctx, hit.code)
+        }
+        taken.setOnClickListener {
+            if (closing) return@setOnClickListener
+            val hit = HookDock.packageCode() ?: return@setOnClickListener
+            PackageCodeSource.markTaken(ctx, hit)
+            card.visibility = View.GONE
+            HookDock.applyContent()
+        }
+        box.addView(
+            card,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(ctx, 10) }
+        )
+        pkgRefs = PkgRefs(card, code, meta, body, taken)
+    }
+
+    /** 每秒的 tick 顺带过一遍：App 那边扫到未读短信里的取件码就会挂上来 */
+    private fun refreshPackageCard(ctx: Context) {
+        val refs = pkgRefs ?: return
+        val hit = HookDock.packageCode()
+        if (hit == null) {
+            refs.card.visibility = View.GONE
+            return
+        }
+        refs.card.visibility = View.VISIBLE
+        refs.code.text = hit.code
+        refs.meta.text = "${hit.label} · ${pkgTime(hit.date)}"
+        refs.body.text = hit.summary
+    }
+
+    private fun copyPackageCode(ctx: Context, code: String) {
+        try {
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            cm?.setPrimaryClip(ClipData.newPlainText("pickup", code))
+            Toast.makeText(ctx, "取件码已复制：$code", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] copy package code failed: $t")
+        }
+    }
+
+    /** 取件码是几天前那条短信带来的，面板上得能说清 */
+    private fun pkgTime(dateMillis: Long): String {
+        if (dateMillis <= 0L) return ""
+        return try {
+            pkgTimeFmt.format(java.util.Date(dateMillis))
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    private val pkgTimeFmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
 
     private fun addMusicCard(box: LinearLayout, night: Boolean, accent: Int) {
         val controller = pickSession(box.context) ?: return

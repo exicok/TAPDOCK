@@ -5,8 +5,7 @@
 
     <string name="xposed_desc">AOSP 任务栏 Dock（基础版）：往系统状态栏/任务栏布局里注入一个黑色圆角 Dock 条，可靠左/靠右，可重启 SystemUI</string>
 
-    <string name="main_hook_title">LSPosed 模块</string>
-    <string name="main_hook_desc">在 LSPosed 管理器中启用本模块，作用域勾选「系统界面 (SystemUI)」与「桌面 (Launcher)」。修改下方开关后，点「重启 SystemUI」立即生效。</string>
+    <string name="main_hook_desc">在 LSPosed 管理器中启用本模块，作用域勾选「系统界面 (SystemUI)」与「桌面 (Launcher)」。改动任何设置后，点右下角按钮重启 SystemUI 立即生效。</string>
     <string name="main_hook_switch">显示任务栏 Dock</string>
     <string name="main_hook_active">已注入 ✓</string>
     <string name="main_hook_inactive">未注入（启用模块并重启 SystemUI 后生效）</string>
@@ -15,6 +14,45 @@
     <string name="opt_align">Dock 位置</string>
     <string name="align_left">靠左</string>
     <string name="align_right">靠右</string>
+
+    <string name="nav_dock">Dock</string>
+    <string name="nav_panel">控制中心</string>
+    <string name="pill_cards">卡片顺序</string>
+    <string name="pill_downloaders">下载器</string>
+    <string name="sub_hook_switch">关闭后状态栏和任务栏里的 Dock 一起隐藏</string>
+    <string name="sub_badge">统计当前活动通知数，含常驻通知</string>
+    <string name="sub_otp">到达后停留 10 秒，点一下复制到剪贴板</string>
+    <string name="sub_align">Dock 贴在状态栏 / 任务栏的哪一侧</string>
+    <string name="sub_color">进度条填充颜色</string>
+    <string name="sub_album">播放音乐时 Dock 背景用模糊封面</string>
+    <string name="sub_thumb">进度条左侧显示封面小图</string>
+    <string name="sub_nyan">彩虹带流动，猫骑在进度前端</string>
+    <string name="sub_download_fmt">已跟踪 %1$d 个下载器应用</string>
+    <string name="sub_download_all">跟踪全部应用的通知</string>
+    <string name="sub_cards">长按拖动换位，可勾选系统磁贴</string>
+    <string name="sub_chart">CPU 全核心 / GPU / 内存 / zram</string>
+    <string name="sec_dock_body">Dock 本体</string>
+    <string name="sec_cards">卡片</string>
+    <string name="sec_status">状态区</string>
+    <string name="preview_dock_title">Dock 当前显示</string>
+    <string name="preview_dock_waiting">还没收到 SystemUI 的回报：确认模块已启用并注入，稍等一秒会自动刷新</string>
+    <string name="preview_dock_idle">此刻 Dock 是空的（图标、徽标、验证码和进度都没有时它显示时钟）</string>
+    <string name="opt_notif_badge">Dock 左侧显示通知数量徽标</string>
+    <string name="opt_notif_card">通知横幅由 Dock 接管</string>
+    <string name="sub_notif_card">关掉系统原生横幅，改在 Dock 下方滑出一张卡片（关掉即恢复原生横幅）</string>
+    <string name="opt_otp">短信验证码显示在 Dock</string>
+    <string name="opt_pkg">未读短信里的快递取件码</string>
+    <string name="sub_pkg">Dock 只亮一颗取件图标，码和短信内容在控制页里看</string>
+    <string name="pkg_perm">读取短信的授权</string>
+    <string name="sub_pkg_denied">未授权：点一下申请，只有拿到 READ_SMS 才扫得到取件码</string>
+    <string name="sub_pkg_none">已授权：最近未读短信里没扫到取件码</string>
+    <string name="sub_pkg_found">当前：%1$s（来自 %2$s）</string>
+    <string name="opt_dock_max">Dock 最大宽度</string>
+    <string name="sub_dock_max">超过上限时进度条先收缩，图标和徽标不缩</string>
+    <string name="max_short">短</string>
+    <string name="max_std">标准</string>
+    <string name="max_long">长</string>
+    <string name="max_none">不限</string>
 
     <string name="btn_restart_systemui">重启 SystemUI（使设置生效）</string>
     <string name="restart_ok">SystemUI 已重启</string>
@@ -30,11 +68,17 @@
     <string name="opt_nyan">进度条彩虹猫风格（流动）</string>
     <string name="opt_album_bg">播放音乐时 Dock 背景显示模糊封面</string>
     <string name="opt_album_thumb">播放音乐时在进度条左侧显示封面小图</string>
-    <string name="opt_cpu_chart">控制中心状态区显示 CPU 全核心占用图</string>
+    <string name="opt_cpu_chart">状态区资源占用图（CPU 全核心 / GPU / 内存 / zram）</string>
     <string name="btn_card_pick">排列卡片顺序…</string>
     <string name="card_order_title">控制中心卡片</string>
-    <string name="card_order_hint">长按卡片拖动换位</string>
+    <string name="card_order_hint">长按卡片拖动换位；下方目录勾选后作为代理卡片加入面板</string>
     <string name="card_order_reset">恢复默认</string>
+    <string name="card_order_sys_refresh">载入系统目录</string>
+    <string name="card_order_section_cards">面板中的卡片</string>
+    <string name="catalog_summary_fmt">目录共 %1$d 项，其中系统内置 %2$d 项</string>
+    <string name="catalog_state_added">已加入</string>
+    <string name="catalog_state_add">加入面板</string>
+    <string name="catalog_empty">系统目录还没回报：点「载入系统目录」，或先下拉打开一次通知栏控制中心</string>
     <string name="download_pick_title">下载进度应用</string>
     <string name="picker_all">全选</string>
     <string name="picker_none">取消全选</string>

@@ -4,6 +4,9 @@
     <!-- 音乐进度应用选择器需要枚举所有可启动应用 -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
+    <!-- 快递取件码：只读未读收件箱，判断"这条码确实在短信里" -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+
     <application
         android:name=".TapDockApp"
         android:allowBackup="true"
@@ -36,6 +39,23 @@
             android:name=".DockConfigProvider"
             android:authorities="com.lsp102.tapdock.config"
             android:exported="true" />
+
+        <!-- 面板请求游戏信息时由 SystemUI 唤醒，跑一次 root 采集就退 -->
+        <receiver
+            android:name=".GameQueryReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.lsp102.tapdock.GAME_QUERY" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".SysStatQueryReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.lsp102.tapdock.SYSSTAT_QUERY" />
+            </intent-filter>
+        </receiver>
 
         <!-- LSPosed / Xposed 模块声明 -->
         <meta-data

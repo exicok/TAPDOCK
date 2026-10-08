@@ -29,6 +29,10 @@ object PrivacyMonitor {
     @Volatile var microphone = false; private set
     @Volatile var location = false; private set
 
+    /** 正在占用摄像头 / 麦克风的应用包名（Dock 上画它们的图标） */
+    @Volatile var cameraPackages: List<String> = emptyList(); private set
+    @Volatile var microphonePackages: List<String> = emptyList(); private set
+
     /** 成功注册到 PrivacyItemController */
     @Volatile
     var available: Boolean = false
@@ -150,17 +154,56 @@ object PrivacyMonitor {
         var cam = false
         var mic = false
         var loc = false
+        val camPkgs = ArrayList<String>(2)
+        val micPkgs = ArrayList<String>(2)
         for (item in items) {
             if (item == null) continue
             when (privacyTypeOf(item)) {
-                "TYPE_CAMERA" -> cam = true
-                "TYPE_MICROPHONE" -> mic = true
+                "TYPE_CAMERA" -> {
+                    cam = true
+                    packagesOf(item).forEach { if (it !in camPkgs) camPkgs.add(it) }
+                }
+                "TYPE_MICROPHONE" -> {
+                    mic = true
+                    packagesOf(item).forEach { if (it !in micPkgs) micPkgs.add(it) }
+                }
                 "TYPE_LOCATION" -> loc = true
             }
         }
         camera = cam
         microphone = mic
         location = loc
+        cameraPackages = camPkgs
+        microphonePackages = micPkgs
+    }
+
+    /**
+     * PrivacyItem 里报占用的包名。本 ROM 是 Android 12 的形状：`application: PrivacyApplication`
+     * （里面是 packageName + userId）；更新的 AOSP 换成了 `packagesList: List<Pair<String, Int>>`，
+     * 两种都认，认不出来就是不画图标位，不影响摄像头 / 麦克风那两颗符号。
+     */
+    private fun packagesOf(item: Any): List<String> {
+        val out = ArrayList<String>(2)
+        field(item, "application")?.let { app ->
+            (field(app, "packageName") as? String)?.let { if (it.isNotEmpty()) out.add(it) }
+        }
+        (field(item, "packagesList") as? List<*>)?.forEach { entry ->
+            val pkg = (entry as? Pair<*, *>)?.first as? String ?: entry as? String
+            if (!pkg.isNullOrEmpty()) out.add(pkg)
+        }
+        return out
+    }
+
+    /** public 字段优先，其次同名 getter：本 ROM 的类被 R8 折叠过，两种都试 */
+    private fun field(target: Any, name: String): Any? = try {
+        target.javaClass.getField(name).get(target)
+    } catch (_: Throwable) {
+        try {
+            target.javaClass.getMethod("get${name.replaceFirstChar { it.uppercase() }}")
+                .invoke(target)
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     /** 本 ROM 的 PrivacyItem 是 Kotlin 类，类型只有 public 字段，没有 getter */

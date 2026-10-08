@@ -57,3 +57,34 @@ enum class CardSpec(
         }
     }
 }
+
+/** 排序界面上一张卡片格子的显示数据 */
+data class CardInfo(val id: String, val label: String, val iconRes: Int)
+
+/**
+ * 把 `card_order`（可能混着原生 id 和 `sys:<spec>`）解析成显示用的格子列表。
+ * 系统磁贴的标签来自 SystemUI 回报的目录，目录里查不到就用 spec 顶上——卡片仍然会出现在面板里，
+ * 只是这一刻还没有中文名可读。
+ */
+object Cards {
+
+    fun resolve(order: List<String>, catalog: List<SysEntry>): List<CardInfo> {
+        val sysBySpec = catalog.associateBy { it.spec }
+        val rest = CardSpec.values().associateBy({ it.id }, { it }).toMutableMap()
+        val out = ArrayList<CardInfo>(order.size)
+        for (id in order) {
+            if (CardIds.isSys(id)) {
+                val spec = CardIds.specOf(id)
+                out.add(
+                    CardInfo(id, sysBySpec[spec]?.label ?: spec, R.drawable.ic_tile_sys)
+                )
+            } else {
+                val native = rest.remove(id) ?: continue
+                out.add(CardInfo(native.id, native.label, native.iconRes))
+            }
+        }
+        // 原生卡片一条都不能丢：顺序表没列到的按声明顺序补在后面
+        rest.values.forEach { out.add(CardInfo(it.id, it.label, it.iconRes)) }
+        return out
+    }
+}

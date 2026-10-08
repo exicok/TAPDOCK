@@ -21,6 +21,9 @@ object CpuSource {
         lastTotal = null
     }
 
+    /** /proc/stat 读不了（被 SELinux 挡 / 内核没导出每核行）时让调用方收起整行 */
+    fun available(): Boolean = !readFailed
+
     /** 每核 0..100，顺序 = cpu0..cpuN；还没基准或读不到时返回空数组（整块不显示而不是画 0%） */
     fun sample(): FloatArray {
         val rows = readRows() ?: return FloatArray(0)

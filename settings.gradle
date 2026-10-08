@@ -8,6 +8,9 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.10.0'
+}
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
@@ -19,3 +22,5 @@ dependencyResolutionManagement {
 }
 rootProject.name = "TapDock"
 include ':app'
+// 通知卡片的手动测试台，独立 APK，不参与模块本体发布
+include ':notiftest'

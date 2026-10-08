@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/tab_dock"
+        android:icon="@drawable/ic_nav_dock"
+        android:title="@string/nav_dock" />
+    <item
+        android:id="@+id/tab_panel"
+        android:icon="@drawable/ic_nav_panel"
+        android:title="@string/nav_panel" />
+</menu>
