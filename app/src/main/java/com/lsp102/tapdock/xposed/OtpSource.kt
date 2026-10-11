@@ -12,11 +12,14 @@ import de.robv.android.xposed.XposedBridge
  *  - 否则要求正文里同时出现验证码类关键词和一串 4–8 位数字，两个条件缺一个都不显示 ——
  *    宁可漏，也不要把银行余额里的数字当验证码挂在状态栏上。
  *
- * 只保留最新一条，超时或对应通知被划走就清掉。
+ * 只保留最新一条，从抓到起满 [TTL_MS] 就撤。
+ *
+ * 通知被划走 / 被短信应用自己撤掉都不提前清：这类应用常常在弹出来两三秒后就 cancel，
+ * 而码本身几分钟内都有效，屏幕上按 10 秒走完才有机会抄完。
  */
 object OtpSource {
 
-    class Code(val text: String, val pkg: String, val key: String, val at: Long)
+    class Code(val text: String, val pkg: String, val at: Long)
 
     /** 验证码在 Dock 上的停留时间（HookDock 按它安排到点撤下，改这里就行） */
     internal const val TTL_MS = 10_000L
@@ -32,13 +35,8 @@ object OtpSource {
     fun onPosted(sbn: StatusBarNotification) {
         val n = sbn.notification ?: return
         val code = extract(n) ?: return
-        current = Code(code, sbn.packageName, keyOf(sbn), System.currentTimeMillis())
+        current = Code(code, sbn.packageName, System.currentTimeMillis())
         XposedBridge.log("[TapDock] otp captured from ${sbn.packageName}")
-    }
-
-    /** 通知被划走 / 被应用撤掉时一起清掉，不留一个已经作废的码在屏幕上 */
-    fun onRemoved(key: String) {
-        if (current?.key == key) current = null
     }
 
     /** 过期自动清空 */
@@ -76,6 +74,4 @@ object OtpSource {
         }
         return DIGITS.find(body)?.groupValues?.getOrNull(1)
     }
-
-    private fun keyOf(sbn: StatusBarNotification) = "${sbn.packageName}:${sbn.id}"
 }

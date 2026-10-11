@@ -2,6 +2,7 @@ package com.lsp102.tapdock.xposed
 
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
+import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.app.AppOpsManager
 import android.app.Notification
@@ -35,6 +36,7 @@ import android.net.NetworkRequest
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
 import android.service.notification.NotificationListenerService
@@ -103,6 +105,17 @@ object HookDock {
     private const val BG_ALPHA_PERCENT = 80
     private const val BG_COLOR_NORMAL = 0x000000
     private const val BG_COLOR_PRIVACY = 0xFFD32F2F.toInt()
+    /**
+     * 低电量告警底色：琥珀 + 红，都取"白图标压上去还读得清"的深档，
+     * 不用亮黄（#FFEB3B 那一档配白色图标等于糊成一片）。
+     */
+    private const val BG_COLOR_BATT_WARN = 0xFFF9A825.toInt()
+    private const val BG_COLOR_BATT_CRIT = 0xFFD32F2F.toInt()
+    /** 电量档位：≤ 20% 黄，≤ 10% 红；-1 = 还没读到过电池广播，不着色 */
+    private const val BATT_WARN_LEVEL = 20
+    private const val BATT_CRIT_LEVEL = 10
+    /** 底色换档的补间时长：比宽度动画长一点，颜色跳变才看得出是"换了一档" */
+    private const val BG_FADE_MS = 320L
     /** ControlPanel 要按这个半径给 Dock 四角补模糊，见 ControlPanel.applyBackdropBlur */
     const val DOCK_CORNER_DP = 12
     private const val MIN_WIDTH_STATUS_DP = 122
@@ -146,7 +159,10 @@ object HookDock {
     private const val WIFI_ICON = 0
 
     /** iconRes 的末位：热点；连上的台数就写在这颗图标右边 */
-    private const val HOTSPOT_ICON = 7
+    private const val HOTSPOT_ICON = 8
+
+    /** 热点之前的一格：前台游戏、且图形元数据已经采到才亮（采集失败就不亮，不空有个图标） */
+    private const val GAME_ICON = 7
 
     /** WiFi 按信号强度分格画：第 0 格是完整扇形，用于连不上/读不到信号时兜底 */
     private val WIFI_LEVEL_ICONS = intArrayOf(
@@ -240,6 +256,9 @@ object HookDock {
 
     /** Dock 最大宽度（dp，0 = 不限）（App 里的档位，走同一套三级通道） */
     private val overrideMaxW = AtomicReference<Int>(null)
+
+    /** App 侧 root 采到的游戏信息（`pkg|api|宽x高|帧率|时间戳`），随 Provider 的 query 回来 */
+    private val overrideGame = AtomicReference<String>(null)
     private var lastPercent: Int? = null
     private var lastStates: BooleanArray? = null
 
@@ -250,6 +269,11 @@ object HookDock {
     /** 上一次下发的彩虹猫开关状态 */
     private var lastNyan = false
     private var lastPrivacyWarn = false
+
+    /** 底色：[lastBg] 是这一档要到的颜色，[bgShown] 是补间当前真实画出来的颜色 */
+    private var lastBg = 0
+    private var bgShown = 0
+    private var bgAnim: ValueAnimator? = null
 
     /** 下载器通知进度：pkg -> 0..100（NotificationListener 管线） */
     private val downloadMap = HashMap<String, Int>()
@@ -376,10 +400,27 @@ object HookDock {
      */
     private fun privacyWarn(): Boolean = PrivacyMonitor.camera || PrivacyMonitor.microphone
 
-    private fun dockBackgroundColor(): Int {
-        val base = if (privacyWarn()) BG_COLOR_PRIVACY else BG_COLOR_NORMAL
-        return (base and 0x00FFFFFF) or ((BG_ALPHA_PERCENT * 255 / 100) shl 24)
+    /** 电量百分比，-1 = 还没读到过；由 watchBattery 的粘性广播喂 */
+    @Volatile
+    private var batteryLevel = -1
+
+    /**
+     * Dock 底色分档：隐私告警红 > 低电红（≤10%）> 低电黄（≤20%）> 常态黑。
+     *
+     * 只看电量，不看是否在充电：插着电掉到 8% 也是真的只剩 8%，
+     * 而且"充电中就不上色"会让这根条在充满之前一直看不出来。
+     */
+    private fun dockBaseColor(): Int = when {
+        privacyWarn() -> BG_COLOR_PRIVACY
+        batteryLevel in 0..BATT_CRIT_LEVEL -> BG_COLOR_BATT_CRIT
+        batteryLevel in 0..BATT_WARN_LEVEL -> BG_COLOR_BATT_WARN
+        else -> BG_COLOR_NORMAL
     }
+
+    private fun dockBackgroundColor(): Int = withAlpha(dockBaseColor())
+
+    private fun withAlpha(color: Int): Int =
+        (color and 0x00FFFFFF) or ((BG_ALPHA_PERCENT * 255 / 100) shl 24)
 
     // ------------------------------------------------------------------ 注入
 
@@ -460,7 +501,7 @@ object HookDock {
 
         // 状态图标排最左：仅激活的项显示
         // WiFi/蓝牙/定位/VPN = 接管自系统状态栏；摄像头/麦克风 = 实际占用时
-        // 末位 = 未读短信里有快递取件码（只亮图标，码和短信内容进面板才给看）
+        // 再往后 = 未读短信里的快递取件码、前台游戏、热点（都只亮图标，详情进面板才给看）
         val iconSize = dp(context, if (compact) ICON_STATUS_DP else ICON_TASKBAR_DP)
         val gap = dp(context, if (compact) ICON_GAP_STATUS_DP else ICON_GAP_TASKBAR_DP)
         val iconRes = intArrayOf(
@@ -471,6 +512,7 @@ object HookDock {
             com.lsp102.tapdock.R.drawable.ic_tile_camera,
             com.lsp102.tapdock.R.drawable.ic_tile_mic,
             com.lsp102.tapdock.R.drawable.ic_row_package,
+            com.lsp102.tapdock.R.drawable.ic_tile_game,
             com.lsp102.tapdock.R.drawable.ic_tile_hotspot,
         )
         val iconsRow = LinearLayout(context).apply {
@@ -669,6 +711,21 @@ object HookDock {
                         ?.let { SysStatSource.ingest(it) }
                     return
                 }
+                // 小窗卡片的画面：App 用 root 截一屏、按窗口矩形裁回来
+                if (intent.action == com.lsp102.tapdock.HookSync.HookActions.SHOT_STATE) {
+                    intent.getStringExtra(com.lsp102.tapdock.HookSync.HookActions.EXTRA_SHOTS)
+                        ?.let { WindowShots.ingest(it) }
+                    return
+                }
+                // 取件码测试注入：不等 3 秒轮询，当帧就把图标挂上 / 摘下
+                if (intent.action == com.lsp102.tapdock.HookSync.HookActions.PKGCODE_STATE) {
+                    PackageCodeSource.ingest(
+                        intent.getStringExtra(com.lsp102.tapdock.HookSync.HookActions.EXTRA_PKGCODE)
+                            ?: ""
+                    )
+                    main.post { applyContent() }
+                    return
+                }
                 // 系统控制块的三种广播直接交给 SystemTiles
                 if (intent.action == SystemTiles.ACTION_CLICK ||
                     intent.action == SystemTiles.ACTION_REFRESH ||
@@ -744,6 +801,8 @@ object HookDock {
             addAction(SystemTiles.ACTION_SNAPSHOT)
             addAction(com.lsp102.tapdock.HookSync.HookActions.DOCK_QUERY)
             addAction(com.lsp102.tapdock.HookSync.HookActions.SYSSTAT_STATE)
+            addAction(com.lsp102.tapdock.HookSync.HookActions.SHOT_STATE)
+            addAction(com.lsp102.tapdock.HookSync.HookActions.PKGCODE_STATE)
         }
         try {
             if (Build.VERSION.SDK_INT >= 33) {
@@ -772,6 +831,7 @@ object HookDock {
         watchersStarted = true
         watchNetwork(ctx)
         watchBluetooth(ctx)
+        watchBattery(ctx)
         XposedBridge.log("[TapDock] status icon watchers started")
     }
 
@@ -828,6 +888,38 @@ object HookDock {
         }
     }
 
+    /**
+     * 电量：粘性广播先读一次打底，之后每有变化再刷一次 Dock。
+     * 不监听就只能等 3 秒兜底轮询，掉到 10% 那一刻的变色会滞后到下一拍。
+     */
+    private fun watchBattery(ctx: Context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                intent ?: return
+                applyBatteryIntent(intent)
+                refreshIcons()
+            }
+        }
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        try {
+            // ACTION_BATTERY_CHANGED 是受保护的系统广播，NOT_EXPORTED 挡住第三方伪造
+            if (Build.VERSION.SDK_INT >= 33) {
+                ctx.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                ctx.registerReceiver(receiver, filter)
+            }
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] battery watcher failed: $t")
+        }
+    }
+
+    private fun applyBatteryIntent(intent: Intent) {
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        if (level >= 0 && scale > 0) batteryLevel = (level * 100 / scale).coerceIn(0, 100)
+    }
+
     private fun startTicker() {
         if (tickerStarted) return
         tickerStarted = true
@@ -863,6 +955,8 @@ object HookDock {
         override fun run() {
             try {
                 fetchRemoteState()
+                // 游戏元数据的采集不能只挂在面板上：面板收着的时候 Dock 那颗游戏图标也要亮
+                appContextRef?.get()?.let { GameInfoSource.refresh(it) }
                 applyContent()
                 // 引擎侧顺便刷新面板在用的系统磁贴（宿主侧这行是空操作）
                 SystemTiles.pushStates(cardOrder())
@@ -905,6 +999,8 @@ object HookDock {
                         if (nci >= 0) overrideNcard.set(c.getInt(nci) == 1)
                         val pci = c.getColumnIndex("pkgcode")
                         if (pci >= 0) PackageCodeSource.ingest(c.getString(pci) ?: "")
+                        val gii = c.getColumnIndex("game")
+                        if (gii >= 0) overrideGame.set(c.getString(gii) ?: "")
                         val mwi = c.getColumnIndex("maxw")
                         if (mwi >= 0) overrideMaxW.set(c.getInt(mwi))
                         if (ai >= 0) overrideAlignRight.set(c.getString(ai) != ALIGN_LEFT)
@@ -995,9 +1091,12 @@ object HookDock {
         val hsCount = HotspotSource.clients
         val hsText = if (!states[HOTSPOT_ICON] || hsCount < 0) "" else hsCount.toString()
         val privPkgs = privacyUsers()
+        // 底色换档（隐私 / 低电）也是一次内容变化：不并进 changed 的话只有别的项变了才跟着刷
+        val bg = dockBackgroundColor()
+        val bgTinted = bg != withAlpha(BG_COLOR_NORMAL)
         val changed = lastStates == null || !lastStates.contentEquals(states) ||
             warn != lastPrivacyWarn || notifCount != lastNotifCount || artShown != lastArtShown ||
-            otpText != lastOtp || privPkgs != lastPrivPkgs || hsText != lastHs
+            otpText != lastOtp || privPkgs != lastPrivPkgs || hsText != lastHs || bg != lastBg
         if (changed) {
             val anyIcon = anyIconShown(states, artShown) || privPkgs.isNotEmpty() ||
                 notifCount > 0 || otpText.isNotEmpty()
@@ -1029,9 +1128,9 @@ object HookDock {
             lastNotifCount = notifCount
             lastOtp = otpText
             lastHs = hsText
-            // 隐私占用时整条 Dock 转红（复用同一个 GradientDrawable，保住胶囊圆角）
-            val bg = dockBackgroundColor()
-            for (b in snapshot) b.pill.setColor(bg)
+            // 隐私占用转红 / 低电转黄转红：都补间过去，别从黑硬跳到警告色
+            animateDockBackground(snapshot, bg)
+            lastBg = bg
         }
 
         if (transition) {
@@ -1055,7 +1154,7 @@ object HookDock {
             snapshot,
             trackPercent == null && !artShown && otpText.isEmpty() && shownIcons <= 2
         )
-        applyBackdrop(snapshot, music)
+        applyBackdrop(snapshot, music, bgTinted)
         applyThumb(snapshot, thumbArt, music.token)
         val color = progressColor()
         val colorChanged = color != lastColor
@@ -1153,11 +1252,13 @@ object HookDock {
     }
 
     /**
-     * Dock 背景优先级：隐私告警红 > 播放中的模糊封面 > 纯色胶囊。
+     * Dock 背景优先级：告警底色（隐私红 / 低电黄红）> 播放中的模糊封面 > 纯色胶囊。
      * 背景用 FILL 的 BitmapDrawable，所以收起 / 放大的宽度动画期间它会跟着缩放，不露旧尺寸。
+     *
+     * [tinted] = 当前底色是告警色：这时封面让位，不然糊一层专辑图就把"没电了"看不出来了。
      */
-    private fun applyBackdrop(snapshot: List<Binding>, music: MusicState) {
-        val art = if (privacyWarn() || !albumArtBg()) null else music.art
+    private fun applyBackdrop(snapshot: List<Binding>, music: MusicState, tinted: Boolean) {
+        val art = if (tinted || privacyWarn() || !albumArtBg()) null else music.art
         val token = music.token
         for (b in snapshot) {
             if (art == null || token == null) {
@@ -1335,8 +1436,13 @@ object HookDock {
         main.postDelayed(otpExpire, OtpSource.TTL_MS)
     }
 
-    /** App 侧 root 采集回来的游戏信息：`pkg|api|宽x高|时间戳`，空 = 还没采到 */
-    internal fun gameInfoRaw(): String = loadPrefs()?.getString("game_info", "") ?: ""
+    /**
+     * App 侧 root 采集回来的游戏信息：`pkg|api|宽x高|帧率|时间戳`，空 = 还没采到。
+     *
+     * 只认 Provider 那一拍：模块 App 的偏好文件在这台机器上从不落盘（见 DockPrefs.gameInfo），
+     * XSharedPreferences 读到的永远是空串。
+     */
+    internal fun gameInfoRaw(): String = overrideGame.get() ?: ""
 
     /** 点验证码：复制到剪贴板，省得在状态栏和短信之间来回抄 */
     private fun copyOtp(context: Context) {
@@ -1434,7 +1540,8 @@ object HookDock {
                     val sbn = param.args?.firstOrNull() as? StatusBarNotification ?: return
                     synchronized(activeNotifs) { activeNotifs.remove(keyOf(sbn)) }
                     synchronized(downloadMap) { downloadMap.remove(sbn.packageName) }
-                    OtpSource.onRemoved(keyOf(sbn))
+                    // 验证码不在这里清：短信应用常常两三秒就把通知 cancel 掉，
+                    // 码得在 Dock 上撑满 OtpSource.TTL_MS 那 10 秒才够抄
                     // 通知被撤掉时卡片跟着收，免得留下一张已经不存在的通知
                     NotificationCard.onRemoved(keyOf(sbn))
                     main.post {
@@ -1551,6 +1658,34 @@ object HookDock {
             }
         })
         b.anim = a
+        a.start()
+    }
+
+    /**
+     * Dock 底色换档：ARGB 补间，复用同一颗 GradientDrawable（保住胶囊圆角）。
+     *
+     * 从"还没画过"的那一版直接补间会让 Dock 出现时先透明一下，所以第一拍不上动画，
+     * 之后每次换档才走补间 —— 掉到 20% / 10% 那两下是要看得出来的渐变。
+     */
+    private fun animateDockBackground(snapshot: List<Binding>, to: Int) {
+        val from = bgShown
+        if (from == to) return
+        bgAnim?.cancel()
+        bgAnim = null
+        if (from == 0 || snapshot.isEmpty()) {
+            bgShown = to
+            snapshot.forEach { it.pill.setColor(to) }
+            return
+        }
+        val a = ValueAnimator.ofObject(ArgbEvaluator(), from, to)
+        a.duration = BG_FADE_MS
+        a.interpolator = DOCK_INTERPOLATOR
+        a.addUpdateListener {
+            val c = it.animatedValue as Int
+            bgShown = c
+            snapshot.forEach { b -> b.pill.setColor(c) }
+        }
+        bgAnim = a
         a.start()
     }
 
@@ -1679,6 +1814,7 @@ object HookDock {
         PrivacyMonitor.camera,
         PrivacyMonitor.microphone,
         packageCode() != null,
+        GameInfoSource.dockLive,
         HotspotSource.enabled(context),
     )
 

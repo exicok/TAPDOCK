@@ -82,11 +82,16 @@ object HookSync {
         }
     }
 
-    /** 请模块 App 用 root 读一次 /proc/stat、/proc/swaps 和 kgsl 节点（SystemUI 域读不到） */
-    fun querySysStat(context: Context) {
+    /**
+     * 请模块 App 用 root 读一次 /proc/stat、/proc/swaps 和 kgsl 节点（SystemUI 域读不到）。
+     * [apps] 是还想顺带按进程读一眼的包名（小窗口卡片要它各自的 CPU / 内存）。
+     */
+    fun querySysStat(context: Context, apps: List<String> = emptyList()) {
         try {
             context.sendBroadcast(
-                Intent(HookActions.SYSSTAT_QUERY).setPackage(MODULE_PKG)
+                Intent(HookActions.SYSSTAT_QUERY)
+                    .setPackage(MODULE_PKG)
+                    .putExtra(HookActions.EXTRA_SYSSTAT_APPS, apps.joinToString(","))
             )
         } catch (_: Exception) {
         }
@@ -109,6 +114,57 @@ object HookSync {
         }
     }
 
+    /**
+     * 请模块 App 用 root 截一屏，再把每个小窗口那块裁回来（控制中心的小窗卡片要显示画面）。
+     *
+     * [crops] 每项形如 `任务id:左,上,宽,高`，单位是屏幕像素、来自任务的 windowConfiguration.bounds。
+     * 整屏只截一次，多个窗口共用那一帧。
+     */
+    fun queryShots(context: Context, crops: List<String>) {
+        if (crops.isEmpty()) return
+        try {
+            context.sendBroadcast(
+                Intent(HookActions.SHOT_QUERY)
+                    .setPackage(MODULE_PKG)
+                    .putExtra(HookActions.EXTRA_SHOT_CROPS, crops.joinToString(";"))
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    /** App → SystemUI：裁好、压成 Base64 JPEG 的窗口画面，`任务id:base64;…` */
+    fun pushShots(context: Context, raw: String) {
+        try {
+            context.sendBroadcast(
+                Intent(HookActions.SHOT_STATE)
+                    .setPackage("com.android.systemui")
+                    .putExtra(HookActions.EXTRA_SHOTS, raw)
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * 把当前该显示的取件码直接推给 Hook 侧，不等 Provider 那一拍。
+     * 现在只有测试注入用得到：注入和图标出现之间隔 3 秒轮询，就看不出是这条路生效了。
+     */
+    fun pushPackageCode(context: Context, raw: String) {
+        for (pkg in listOf(
+            "com.android.systemui",
+            "com.android.launcher3",
+            "com.google.android.apps.nexuslauncher",
+        )) {
+            try {
+                context.sendBroadcast(
+                    Intent(HookActions.PKGCODE_STATE)
+                        .setPackage(pkg)
+                        .putExtra(HookActions.EXTRA_PKGCODE, raw)
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     /** 与 Hook 侧常量保持一致（避免 App 进程引用 Xposed API 类） */
     object HookActions {
         const val RELOAD = "com.lsp102.tapdock.HOOK_RELOAD"
@@ -118,10 +174,27 @@ object HookSync {
         /** SystemUI → App：请它跑一次 root 采集 */
         const val GAME_QUERY = "com.lsp102.tapdock.GAME_QUERY"
         const val EXTRA_GAME_PKG = "game_pkg"
+        /** SystemUI → App：请 root 采一帧 CPU / zram / GPU */
         const val SYSSTAT_QUERY = "com.lsp102.tapdock.SYSSTAT_QUERY"
         /** App → SystemUI：root 采回来的一帧 CPU / GPU / zram */
         const val SYSSTAT_STATE = "com.lsp102.tapdock.SYSSTAT_STATE"
         const val EXTRA_SYSSTAT = "sysstat"
+        /** SystemUI → App：这一帧还要顺带按进程读哪些包名（逗号分隔） */
+        const val EXTRA_SYSSTAT_APPS = "sysstat_apps"
+
+        /** SystemUI → App：截一屏并把这几个小窗口裁回来（分号分隔的裁剪矩形） */
+        const val SHOT_QUERY = "com.lsp102.tapdock.SHOT_QUERY"
+        const val EXTRA_SHOT_CROPS = "shot_crops"
+        /** App → SystemUI：裁好的窗口画面 */
+        const val SHOT_STATE = "com.lsp102.tapdock.SHOT_STATE"
+        const val EXTRA_SHOTS = "shots"
+
+        /** App → SystemUI：取件码换了一条（测试注入用，绕开 3 秒轮询） */
+        const val PKGCODE_STATE = "com.lsp102.tapdock.PKGCODE_STATE"
+        const val EXTRA_PKGCODE = "pkgcode_raw"
+
+        /** App 侧测试台：注入 / 清除一条"取件短信"，见 PackageCodeTestReceiver */
+        const val PKGCODE_TEST = "com.lsp102.tapdock.PKGCODE_TEST"
 
         /** SystemUI → App：Dock 此刻真实渲染的内容快照 */
         const val DOCK_STATE = "com.lsp102.tapdock.DOCK_STATE"

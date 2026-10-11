@@ -13,9 +13,12 @@ class SysStatQueryReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         val pending = goAsync()
+        val apps = intent.getStringExtra(HookSync.HookActions.EXTRA_SYSSTAT_APPS).orEmpty()
+            .split(',')
+            .filter { it.isNotEmpty() }
         Thread {
             try {
-                SysStatCollector.collect(context.applicationContext)
+                SysStatCollector.collect(context.applicationContext, apps)
             } finally {
                 pending.finish()
             }

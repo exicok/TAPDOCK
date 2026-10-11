@@ -88,12 +88,31 @@ class DockPrefs(context: Context) {
         get() = sp.getString(KEY_PKG_CODE_BLOCKED, "") ?: ""
         set(v) = sp.edit().putString(KEY_PKG_CODE_BLOCKED, v).apply()
 
+    /**
+     * 测试注入的取件码（同 [packageCode] 的编码格式），空 = 没有。
+     * 走 PackageCodeTestReceiver 的广播写，用来在没有真短信的机器上验 Dock / 面板显示。
+     */
+    var packageCodeTest: String
+        get() = sp.getString(KEY_PKG_CODE_TEST, "") ?: ""
+        set(v) = sp.edit().putString(KEY_PKG_CODE_TEST, v).apply()
+
+    /** 注入值的有效截止时间；过期后 current() 把它清掉，恢复成真实扫描 */
+    var packageCodeTestUntil: Long
+        get() = sp.getLong(KEY_PKG_CODE_TEST_UNTIL, 0L)
+        set(v) = sp.edit().putLong(KEY_PKG_CODE_TEST_UNTIL, v).apply()
+
     /** Dock 最大宽度（dp），0 = 不限；内容超过它时进度条先收缩 */
     var dockMaxDp: Int
         get() = sp.getInt(KEY_DOCK_MAX_DP, DEFAULT_DOCK_MAX_DP)
         set(v) = sp.edit().putInt(KEY_DOCK_MAX_DP, v).apply()
 
-    /** App 侧 root 采集的游戏信息：`pkg|api|宽x高|时间戳`，空 = 没有 */
+    /**
+     * App 侧 root 采集的游戏信息：`pkg|api|宽x高|帧率|时间戳`，帧率没差分出来就是空段。
+     *
+     * Hook 侧不从文件读它，而是随 DockConfigProvider 的 query 拿同一份内存值：这台机器上 LSPosed
+     * 给模块 App 装了 preferences hook，偏好从不落盘（连 commit 都不生成文件），
+     * XSharedPreferences 那条路永远只能读到默认值。
+     */
     var gameInfo: String
         get() = sp.getString(KEY_GAME_INFO, "") ?: ""
         set(v) = sp.edit().putString(KEY_GAME_INFO, v).apply()
@@ -127,6 +146,8 @@ class DockPrefs(context: Context) {
         private const val KEY_PKG_CODE_ENABLED = "pkg_code_enabled"
         private const val KEY_PKG_CODE = "pkg_code"
         private const val KEY_PKG_CODE_BLOCKED = "pkg_code_blocked"
+        private const val KEY_PKG_CODE_TEST = "pkg_code_test"
+        private const val KEY_PKG_CODE_TEST_UNTIL = "pkg_code_test_until"
         private const val KEY_NOTIF_CARD = "notif_card"
         private const val KEY_DOCK_MAX_DP = "dock_max_dp"
         private const val KEY_GAME_INFO = "game_info"

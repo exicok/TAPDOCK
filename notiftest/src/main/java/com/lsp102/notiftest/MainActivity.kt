@@ -93,6 +93,7 @@ class MainActivity : Activity() {
             "group" -> fireGroup()
             "progress" -> fireProgress()
             "cooldown" -> fireCooldown()
+            "otp" -> fireOtp()
             "cancel" -> cancelAll()
             else -> log("未知用例：$case")
         }
@@ -224,6 +225,19 @@ class MainActivity : Activity() {
         log("三条间隔 7s/11s：首条弹，第二条压掉，第三条看冷却窗口是否已过")
     }
 
+    /**
+     * 验证码：正文自带关键词 + 数字，接管侧该抓到它。
+     * 2 秒后把通知撤掉，模拟短信应用自己 cancel 通知的常见行为——Dock 上的码不该跟着消失。
+     */
+    private fun fireOtp() {
+        val id = nextId()
+        post(id, NotificationManager.IMPORTANCE_HIGH, "登录验证码", "您的验证码是 823915，请在十分钟内使用")
+        main.postDelayed({
+            nm.cancel(id)
+            log("已撤回 #$id：Dock 上的 823915 应该继续留到 10 秒")
+        }, 2000L)
+    }
+
     private fun fireBig() {
         cancelAll()
         val id = nextId()
@@ -315,7 +329,7 @@ class MainActivity : Activity() {
         root.addView(
             text(
                 "命令行触发：adb shell am start -n com.lsp102.notiftest/.MainActivity " +
-                    "--es fire high|queue|update|big|group|progress|cooldown|cancel",
+                    "--es fire high|queue|update|big|group|progress|cooldown|otp|cancel",
                 11f,
                 Typeface.NORMAL,
                 Color.parseColor("#FF1769AA"),
@@ -370,6 +384,7 @@ class MainActivity : Activity() {
             Pair("⑥ 后台进度条（不该刷屏）") { fireProgress() },
             Pair("⑦ 撤回全部（卡片应立刻收起）") { cancelAll() },
             Pair("⑧ 冷却窗口内连发（只弹第一条）") { fireCooldown() },
+            Pair("⑨ 验证码 · 通知撤回后仍留 10 秒") { fireOtp() },
         ).forEach { (t, run) -> root.addView(btn(t) { run() }) }
 
         root.addView(label("日志"))

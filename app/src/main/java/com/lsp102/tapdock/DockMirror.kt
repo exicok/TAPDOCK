@@ -6,7 +6,8 @@ import android.content.Intent
  * Hook 侧（SystemUI）回报的「Dock 此刻真实渲染的内容」，App 首页顶部按它画预览。
  *
  * 只信回报，不在 App 里猜：没收到之前预览区给出等待提示，不画假数字。
- * 图标位掩码的顺序与 HookDock 的 iconRes 一致：0 WLAN、1 蓝牙、2 定位、3 VPN、4 摄像头、5 麦克风。
+ * 图标位掩码的顺序与 HookDock 的 iconRes 一致：
+ * 0 WLAN、1 蓝牙、2 定位、3 VPN、4 摄像头、5 麦克风、6 取件码、7 游戏、8 热点。
  */
 data class DockMirror(
     val badge: Int,
@@ -31,6 +32,9 @@ data class DockMirror(
             R.drawable.ic_tile_vpn,
             R.drawable.ic_tile_camera,
             R.drawable.ic_tile_mic,
+            R.drawable.ic_row_package,
+            R.drawable.ic_tile_game,
+            R.drawable.ic_tile_hotspot,
         )
 
         private val A = HookSync.HookActions

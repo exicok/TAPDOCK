@@ -8,3 +8,4 @@ local.properties
 .tooling/
 .DS_Store
 captures/
+.verify/

@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.TrafficStats
 import android.net.wifi.WifiManager as WifiManagerAlias
@@ -104,6 +105,15 @@ object ControlPanel {
     private const val ANIM_SCALE = 0.82f
     private const val OPEN_OVERSHOOT = 1.4f
 
+    /**
+     * 差分类读数（CPU 条 / 速率 / 帧率）的补拍：面板每秒那一拍才是稳态节奏，
+     * 但打开后的头一两拍必然没有基准，等它就是用户看到的"点开一秒才出数"。
+     * 补到出数为止，最多 [WARM_ROUNDS] 拍（root 没授权时也别无限问下去）。
+     */
+    private const val WARM_POLL_MS = 200L
+    private const val WARM_ROUNDS = 8
+    private var warmRounds = 0
+
     private var panelView: LinearLayout? = null
     private var panelWm: WindowManager? = null
 
@@ -142,6 +152,23 @@ object ControlPanel {
     private var progressBox: LinearLayout? = null
     private val progressRows = mutableListOf<ProgressRow>()
     private var progressKeys: List<String> = emptyList()
+
+    /** 小窗口区（进度条区下方）：一个开着的自由窗口一张独立卡片，增删才重排，读数每秒改 */
+    private var freeformBox: LinearLayout? = null
+    private var freeformKeys: List<String> = emptyList()
+    private val freeformCards = mutableListOf<FreeformCard>()
+
+    /** 最近一帧 root 采集结果，小窗卡的 CPU / GPU / 内存从这份读 */
+    private var lastStat = SysStatSource.Frame(FloatArray(0), null, null)
+
+    /** 一张小窗卡片：本体、这一条窗口的快照、读数行、画面位 */
+    private class FreeformCard(
+        val root: LinearLayout,
+        var win: FreeformTopHook.Win,
+        val meta: TextView,
+        val shot: ImageView,
+        var shown: Bitmap? = null,
+    )
 
     /** 状态区：蜂窝信号 / 电量 / WLAN 信号 / 网络上下行 / 当前页面帧率，面板开着时跟着 1 秒节拍刷新 */
     private class StatusRefs(
@@ -226,6 +253,8 @@ object ControlPanel {
                     refreshPackageCard(ctx)
                     refreshProgressRows(ctx)
                     refreshStatus(ctx)
+                    // 排在状态之后：小窗卡的 CPU / 内存要用这一拍刚采回来的那一帧
+                    refreshFreeformRows(ctx)
                 }
                 connectRefresh.forEach { it() }
             } catch (t: Throwable) {
@@ -292,6 +321,7 @@ object ControlPanel {
         val backdrop = backdropBlurView
         closing = true
         main.removeCallbacks(musicTick)
+        main.removeCallbacks(statusWarm)
         connectRefresh = emptyList()
         backdrop?.animate()?.alpha(0f)?.setDuration(CLOSE_MS)?.start()
         if (panel == null) {
@@ -311,6 +341,8 @@ object ControlPanel {
     private fun removePanelViews() {
         closing = false
         HookDock.setPanelOpen(false)
+        // 游戏信息的采集降回"只要图标亮灭"的节奏，别为了关着的面板每五秒 dumpsys 一次
+        GameInfoSource.panelOpen(false)
         cancelBackdropBlurRetry()
         musicRefs = null
         pkgRefs = null
@@ -322,6 +354,11 @@ object ControlPanel {
         memRow = null
         zramRow = null
         gameInfo = null
+        freeformBox = null
+        freeformCards.clear()
+        freeformKeys = emptyList()
+        // 关面板就停掉截屏请求，并丢掉这一轮的画面：下次打开从图标占位重新开始
+        WindowShots.clear()
         barsLogged = false
         trafficAt = 0L
         backdropBlurActive = false
@@ -430,7 +467,12 @@ object ControlPanel {
                 // 面板改尺寸（进度行增减）不影响模糊区，但 Dock 收起/展开会动排除区，
                 // 那边由 HookDock 的布局回调来补发。
             }
+            // 面板开着：游戏信息回到 5 秒一拍，并且这一拍马上问一次
+            GameInfoSource.panelOpen(true)
             main.post(musicTick)
+            // 差分类读数补几拍，别空到第一次每秒节拍才出数
+            warmRounds = 0
+            main.postDelayed(statusWarm, WARM_POLL_MS)
             XposedBridge.log("[TapDock] control panel shown")
         } catch (t: Throwable) {
             removePanelViews()
@@ -534,6 +576,7 @@ object ControlPanel {
             addCardGrid(left, style)
             addStatusSection(right, night, contentOff, accent)
             addProgressSection(right, night, accent)
+            addFreeformSection(right, night)
             box.addView(
                 split,
                 LinearLayout.LayoutParams(
@@ -545,6 +588,7 @@ object ControlPanel {
             addCardGrid(box, style)
             addStatusSection(box, night, contentOff, accent)
             addProgressSection(box, night, accent)
+            addFreeformSection(box, night)
         }
         return box
     }
@@ -972,8 +1016,8 @@ object ControlPanel {
      * "角上的糊和别处不同步"。现在面板和 Dock 一样，只靠自身半透明底色浮在这层毛玻璃上，
      * 材质由同一个半径决定。
      *
-     * 只有 Dock 那块保持清晰（图标糊了就不能看），而胶囊是圆角、排除区只能是矩形，
-     * 所以四角各补一个方块进模糊区——方块与胶囊重叠的部分是纯色底，糊了看不出来。
+     * 只有 Dock 和开着的小窗口那块保持清晰（图标糊了就不能看，小窗正被用户挑），而胶囊是圆角、
+     * 排除区只能是矩形，所以四角各补一个方块进模糊区——方块与胶囊重叠的部分是纯色底，糊了看不出来。
      */
     private fun applyBackdropBlur(backdrop: View, logFailure: Boolean = true): Boolean {
         if (Build.VERSION.SDK_INT < 31 || backdropBlurView !== backdrop) return false
@@ -1011,6 +1055,18 @@ object ControlPanel {
             val visible = Region(0, 0, root.width, root.height)
             if (dock.width() > 0 && dock.height() > 0) {
                 visible.op(Region(dock), Region.Op.DIFFERENCE)
+            }
+            // 开着的小窗口也不糊：它们在屏幕上有自己的位置，糊了既看不清用户在管谁，
+            // 卡片上那张画面（从整屏裁的）也会跟着糊
+            FreeformTopHook.windows().forEach { w ->
+                val f = w.frame ?: return@forEach
+                val rect = Rect(
+                    f.x - rootLoc[0], f.y - rootLoc[1],
+                    f.x - rootLoc[0] + f.w, f.y - rootLoc[1] + f.h
+                )
+                if (rect.width() > 0 && rect.height() > 0) {
+                    visible.op(Region(rect), Region.Op.DIFFERENCE)
+                }
             }
             val iterator = RegionIterator(visible)
             val rect = Rect()
@@ -1191,7 +1247,8 @@ object ControlPanel {
         // 游戏信息行：只有前台是游戏且 Game SDK 报得出数据时才占一行
         val game = TextView(ctx).apply {
             textSize = 11f
-            maxLines = 1
+            // 五个字段一行放不下，允许折成两行，别把帧率挤没
+            maxLines = 2
             gravity = Gravity.CENTER
             setTextColor(accent)
             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -1210,9 +1267,10 @@ object ControlPanel {
             gpuRow = addBarsRow(box, ctx, "GPU", 1, false, true, night, content, accent)
             memRow = addBarsRow(box, ctx, "内存", 1, false, true, night, content, accent)
             zramRow = addBarsRow(box, ctx, "zram", 1, false, true, night, content, accent)
-            // 重新起一段：不然第一次读数会把"面板关着的这段时间"平均进来
-            SysStatSource.reset()
         }
+        // 重新起一段：不然第一次读数会把"面板关着的这段时间"平均进来。
+        // 状态图关掉也要 reset —— 小窗卡的按进程 CPU 走的是同一份差分基准。
+        SysStatSource.reset()
         parent.addView(
             box,
             LinearLayout.LayoutParams(
@@ -1220,6 +1278,8 @@ object ControlPanel {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(ctx, 6) }
         )
+        // 帧率窗口从面板出现这一拍算起，别把面板关着期间攒的帧数平均进来
+        FpsMonitor.openWindow()
         // 建面板时就取一次值，和进度区一样跟着控制中心同帧出现
         refreshStatus(ctx)
         XposedBridge.log("[TapDock] status area: " + refs.joinToString(" | ") { it.text.toString() })
@@ -1306,26 +1366,83 @@ object ControlPanel {
         refs.cell.text = "蜂窝 ${cellLevelText(ctx)}"
         refs.battery.text = batteryText(ctx)
         refs.wifi.text = "WLAN ${wifiLevelText(ctx)}"
-        refs.traffic.text = trafficText()
-        // 一次 tick 只取一次：sample() 会消费掉这一段的帧数窗口
-        refs.fps.text = "帧率 ${FpsMonitor.sample()}"
+        refreshDiff(ctx)
         gameInfo?.let { tv ->
             GameInfoSource.refresh(ctx)
             val gi = GameInfoSource.peek(ctx)
             if (gi == null) {
                 tv.visibility = View.GONE
             } else {
-                tv.text = "游戏 ${gi.label} · ${gi.api} · ${gi.resolution}"
+                val hz = refreshHz(ctx)
+                val rate = when {
+                    gi.fps.isNotEmpty() && hz > 0 -> "${gi.fps}帧/${hz}Hz"
+                    gi.fps.isNotEmpty() -> "${gi.fps}帧"
+                    hz > 0 -> "${hz}Hz"
+                    else -> null
+                }
+                // 帧数是两次采样之间的差分，头一格必空；这时只报刷新率，不写 0 帧冒充
+                tv.text = listOfNotNull(
+                    "游戏 ${gi.label}", gi.api, gi.resolution, rate,
+                    if (GameInfoSource.background) "后台" else "前台",
+                ).joinToString(" · ")
                 tv.visibility = View.VISIBLE
             }
         }
-        refreshBars(ctx)
+    }
+
+    /**
+     * 状态区里"要两拍做差分"的那几格：上下行速率、页面帧率、CPU/GPU/zram 三条图。
+     * 第一拍必然没有基准，所以只有这几格单独有个短间隔的补拍（[statusWarm]），
+     * 蜂窝/电量/WLAN 是现读的系统状态，跟着面板同帧就出来了。
+     *
+     * @return CPU 条已经有数了 = 差分基准凑齐，补拍可以收工
+     */
+    private fun refreshDiff(ctx: Context): Boolean {
+        statusRefs?.let { refs ->
+            refs.traffic.text = trafficText()
+            // 一次调用只取一次：sample() 会消费掉这一段的帧数窗口
+            refs.fps.text = "帧率 ${FpsMonitor.sample()}"
+        }
+        // 一次拍只发一次 root 采集请求：CPU / GPU / zram 和小窗卡要的按进程读数同属那一帧
+        val pkgs = FreeformTopHook.windows().map { it.pkg }.distinct()
+        val st = SysStatSource.poll(ctx, pkgs)
+        // 小窗卡片的画面另走一次 root 截屏（内部两秒节流）：一屏截一次，几个窗口共用
+        WindowShots.request(
+            ctx,
+            FreeformTopHook.windows().mapNotNull { w -> w.frame?.let { f -> "${w.taskId}:${f.spec}" } }
+        )
+        lastStat = st
+        refreshBars(ctx, st)
+        return st.cores.isNotEmpty()
+    }
+
+    /** 面板刚出现时的短间隔补拍：把差分类读数的空窗从 1~2 秒压到半秒内 */
+    private val statusWarm = object : Runnable {
+        override fun run() {
+            val ctx = panelView?.context ?: return
+            var ready = false
+            try {
+                ready = refreshDiff(ctx)
+            } catch (t: Throwable) {
+                XposedBridge.log("[TapDock] status warmup failed: $t")
+            }
+            if (panelView == null || ready || ++warmRounds >= WARM_ROUNDS) return
+            main.postDelayed(this, WARM_POLL_MS)
+        }
+    }
+
+    /** 屏幕此刻的刷新率，取不到回 0 = 这一格不显示 */
+    @Suppress("DEPRECATION")
+    private fun refreshHz(ctx: Context): Int = try {
+        val wm = ctx.getSystemService(WindowManager::class.java)
+        val hz = wm?.defaultDisplay?.refreshRate ?: 0f
+        if (hz > 1f) Math.round(hz) else 0
+    } catch (_: Throwable) {
+        0
     }
 
     /** 五张资源图各自的取数 + 显隐；数据源读不到就整行收起，不留一条 0% 的假条 */
-    private fun refreshBars(ctx: Context) {
-        // 一次 tick 只发一次 root 采集请求：CPU / GPU / zram 同属那一帧
-        val st = SysStatSource.poll(ctx)
+    private fun refreshBars(ctx: Context, st: SysStatSource.Frame) {
         cpuRow?.let { r ->
             if (st.cores.isEmpty()) {
                 r.row.visibility = View.GONE
@@ -1734,6 +1851,211 @@ object ControlPanel {
     }
 
     private val pkgTimeFmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+
+    // ------------------------------------------------------------------ 小窗口区
+
+    /**
+     * 小窗口区（在进度条区下方）：每个开着的自由窗口一张独立卡片，一个都没有就整块 GONE。
+     * 卡片两行 —— 上排图标 + 应用名 + 关闭，下排这个窗口当前的分辨率和它自己的 CPU / 内存，
+     * 外加全机 GPU（kgsl 只有一个节点，给不出按进程的 GPU）。
+     *
+     * 窗口列表来自 FreeformTopHook 从 ShellTaskOrganizer 收下的任务，读数来自状态区同一帧 root 采集。
+     */
+    private fun addFreeformSection(parent: LinearLayout, night: Boolean) {
+        val ctx = parent.context
+        val box = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        box.addView(
+            TextView(ctx).apply {
+                text = "小窗口"
+                textSize = 11f
+                setTextColor(if (night) 0xFF9A9AA5.toInt() else 0xFF5A5C63.toInt())
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(ctx, 5) }
+        )
+        freeformBox = box
+        freeformKeys = emptyList()
+        freeformCards.clear()
+        // 上一段面板留下的读数不算这一段的，先空着让卡片显示 --
+        lastStat = SysStatSource.Frame(FloatArray(0), null, null)
+        parent.addView(
+            box,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(ctx, 6) }
+        )
+        // 建面板时就同步填一次，免得等下一秒的 tick 才出现（和取件码卡片同理）
+        refreshFreeformRows(ctx)
+    }
+
+    /**
+     * 只在增减窗口时重排卡片（拖动改尺寸每秒都在变，重建视图不划算，读数行原地改就行）；
+     * 每秒 tick 做可见性 + 读数。
+     */
+    private fun refreshFreeformRows(ctx: Context) {
+        val box = freeformBox ?: return
+        val wins = FreeformTopHook.windows()
+        val keys = wins.map { "${it.taskId}:${it.pkg}" }
+        if (keys != freeformKeys) {
+            while (box.childCount > 1) box.removeViewAt(box.childCount - 1)
+            freeformCards.clear()
+            val night = (ctx.resources.configuration.uiMode and
+                Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+            wins.forEach { win ->
+                val card = freeformCard(ctx, win, night)
+                freeformCards.add(card)
+                box.addView(
+                    card.root,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = dp(ctx, 6) }
+                )
+            }
+            freeformKeys = keys
+            // 窗口进出要重算遮罩的清晰排除区：卡片上那张画面是从屏幕上裁下来的，
+            // 遮罩把这块糊了，裁出来就是一团糊，等于没有画面
+            refreshBackdropBlur()
+        }
+        box.visibility = if (wins.isEmpty()) View.GONE else View.VISIBLE
+        refreshFreeformMetrics()
+    }
+
+    /** 建一张卡片：上排图标 + 应用名 + 关闭，下排窗口画面 + 读数 */
+    private fun freeformCard(
+        ctx: Context,
+        win: FreeformTopHook.Win,
+        night: Boolean,
+    ): FreeformCard {
+        val titleColor = if (night) 0xFFEDEDED.toInt() else 0xFF1B1B1F.toInt()
+        val chipBg = if (night) 0xFF3A3B40.toInt() else 0xFFCFD2D9.toInt()
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val icon = ImageView(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(ctx, 24), dp(ctx, 24))
+        }
+        val name = TextView(ctx).apply {
+            textSize = 13f
+            maxLines = 1
+            setTextColor(titleColor)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            ).apply { marginStart = dp(ctx, 10) }
+        }
+        // 关闭刻意做成独立的一颗：整行可点的误触代价是白白丢掉一个正在用的窗口
+        val close = TextView(ctx).apply {
+            text = "关闭"
+            textSize = 12f
+            setTextColor(titleColor)
+            gravity = Gravity.CENTER
+            setPadding(dp(ctx, 10), dp(ctx, 5), dp(ctx, 10), dp(ctx, 5))
+            background = GradientDrawable().apply {
+                setColor(chipBg)
+                cornerRadius = dp(ctx, 9).toFloat()
+            }
+            setOnClickListener {
+                if (closing) return@setOnClickListener
+                FreeformTopHook.close(win.taskId)
+                refreshFreeformRows(ctx)
+            }
+        }
+        try {
+            val ai = ctx.packageManager.getApplicationInfo(win.pkg, 0)
+            icon.setImageDrawable(ctx.packageManager.getApplicationIcon(ai))
+            name.text = ctx.packageManager.getApplicationLabel(ai)
+        } catch (t: Throwable) {
+            name.text = win.pkg
+            XposedBridge.log("[TapDock] 小窗口取应用名失败 ${win.pkg}: $t")
+        }
+        row.addView(icon)
+        row.addView(name)
+        row.addView(close)
+        // 画面位先用应用图标占位：第一帧要等一次 root 截屏（几百毫秒），别先空个洞
+        val shot = ImageView(ctx).apply {
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setImageDrawable(icon.drawable)
+            setPadding(dp(ctx, 2), dp(ctx, 2), dp(ctx, 2), dp(ctx, 2))
+            background = GradientDrawable().apply {
+                setColor(if (night) 0xFF33343A.toInt() else 0xFFC9CCD4.toInt())
+                cornerRadius = dp(ctx, 8).toFloat()
+            }
+        }
+        val meta = TextView(ctx).apply {
+            textSize = 11f
+            // 一行放不下就折成两行，别把内存那格截掉
+            maxLines = 2
+            setTextColor(if (night) 0xFF9A9AA5.toInt() else 0xFF5A5C63.toInt())
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        val bottom = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                shot,
+                LinearLayout.LayoutParams(dp(ctx, 60), dp(ctx, 38))
+            )
+            addView(
+                meta,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    .apply { marginStart = dp(ctx, 8) }
+            )
+        }
+        val card = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                setColor(if (night) 0xFF26262C.toInt() else 0xFFE4E6EC.toInt())
+                cornerRadius = dp(ctx, 18).toFloat()
+            }
+            setPadding(dp(ctx, 12), dp(ctx, 9), dp(ctx, 12), dp(ctx, 9))
+            addView(row, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
+            addView(
+                bottom,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(ctx, 5) }
+            )
+        }
+        return FreeformCard(card, win, meta, shot)
+    }
+
+    /** 读数行：`分辨率 · 该进程CPU · 全机GPU · 该进程内存`，拿不到就写 --，不拿 0% 冒充 */
+    private fun refreshFreeformMetrics() {
+        val st = lastStat
+        val wins = FreeformTopHook.windows()
+        freeformCards.forEach { c ->
+            // 分辨率跟着拖动/缩放变，但只换这份快照，不重画卡片
+            wins.firstOrNull { it.taskId == c.win.taskId }?.let { c.win = it }
+            // 画面：App 那边截回来才换，换了才 setImageBitmap（反复设同一张会白白重绘）
+            WindowShots.bitmap(c.win.taskId)?.let { bmp ->
+                if (bmp !== c.shown) {
+                    c.shown = bmp
+                    c.shot.scaleType = ImageView.ScaleType.FIT_CENTER
+                    c.shot.setImageBitmap(bmp)
+                }
+            }
+            val app = st.apps[c.win.pkg]
+            val rss = app?.rssKb
+            c.meta.text = listOf(
+                c.win.sizeText.ifEmpty { "--" },
+                app?.cpu?.let { "CPU ${it}%" } ?: "CPU --",
+                st.gpu?.let { "GPU ${it}%" } ?: "GPU --",
+                rss?.let { "内存 ${SysStatSource.fmt(it)}" } ?: "内存 --",
+            ).joinToString(" · ")
+        }
+    }
 
     private fun addMusicCard(box: LinearLayout, night: Boolean, accent: Int) {
         val controller = pickSession(box.context) ?: return

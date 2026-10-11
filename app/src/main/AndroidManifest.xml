@@ -57,6 +57,24 @@
             </intent-filter>
         </receiver>
 
+        <!-- 小窗卡片要窗口画面时由 SystemUI 唤醒，跑一次 root 截屏 + 裁剪就退 -->
+        <receiver
+            android:name=".WindowShotQueryReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.lsp102.tapdock.SHOT_QUERY" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 取件码显示的手动测试台：am broadcast 注入一条"取件短信"，见 PackageCodeTestReceiver -->
+        <receiver
+            android:name=".PackageCodeTestReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.lsp102.tapdock.PKGCODE_TEST" />
+            </intent-filter>
+        </receiver>
+
         <!-- LSPosed / Xposed 模块声明 -->
         <meta-data
             android:name="xposedmodule"

@@ -12,6 +12,7 @@ class MainHook : IXposedHookLoadPackage {
             "com.android.systemui" -> {
                 FpsMonitor.hook()
                 StatusBarHook.hook(lpparam.classLoader)
+                FreeformTopHook.hook(lpparam.classLoader)
             }
 
             // 12L 任务栏（运行在桌面进程）

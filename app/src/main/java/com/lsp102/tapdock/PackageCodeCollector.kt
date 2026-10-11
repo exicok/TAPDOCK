@@ -28,6 +28,9 @@ object PackageCodeCollector {
     /** Provider 每 3 秒就被 Hook 侧查一次，别每次都真去读库 */
     private const val RESCAN_MS = 60_000L
 
+    /** 测试注入的存活时间：到期自己消失，不用谁来收尾 */
+    private const val TEST_TTL_MS = 5 * 60_000L
+
     private val PROJECTION = arrayOf(
         Telephony.Sms._ID,
         Telephony.Sms.ADDRESS,
@@ -63,11 +66,52 @@ object PackageCodeCollector {
      */
     fun current(context: Context, force: Boolean = false): String {
         val prefs = DockPrefs(context)
+        testValue(prefs)?.let { return it }
         if (force || System.currentTimeMillis() - lastScanAt >= RESCAN_MS) {
             lastScanAt = System.currentTimeMillis()
             prefs.packageCode = scan(context, prefs.packageCodeDismissed)
         }
         return prefs.packageCode
+    }
+
+    /**
+     * 测试注入一条"短信"：正文走真解析链路（关键词 + 码型 + 反例过滤），
+     * 所以它既能验 Dock / 面板的显示，也能验解析本身。解析不出就是清空。
+     *
+     * @return 注入后该显示的码；null = 这条正文按规则不该命中
+     */
+    fun setTest(context: Context, body: String): String? {
+        val prefs = DockPrefs(context)
+        val code = parse(body)
+        if (code == null) {
+            clearTest(context)
+            android.util.Log.i(TAG, "test body matched nothing: ${body.take(40)}")
+            return null
+        }
+        val at = System.currentTimeMillis()
+        prefs.packageCodeTest = encode(Hit(at, code, label(body, ""), at, flat(body)))
+        prefs.packageCodeTestUntil = at + TEST_TTL_MS
+        android.util.Log.i(TAG, "test injected: $code / ${label(body, "")}")
+        return code
+    }
+
+    /** 清掉注入值，恢复真实扫描 */
+    fun clearTest(context: Context) = clearPrefs(DockPrefs(context))
+
+    /** 注入值还在有效期内就直用；过期顺手抹掉，下一拍回到真实扫描 */
+    private fun testValue(prefs: DockPrefs): String? {
+        val raw = prefs.packageCodeTest
+        if (raw.isBlank()) return null
+        if (System.currentTimeMillis() > prefs.packageCodeTestUntil) {
+            clearPrefs(prefs)
+            return null
+        }
+        return raw
+    }
+
+    private fun clearPrefs(prefs: DockPrefs) {
+        prefs.packageCodeTest = ""
+        prefs.packageCodeTestUntil = 0L
     }
 
     /** 面板上点了"已取"：把这条 _id 记进黑名单，缓存立刻作废 */
@@ -80,6 +124,8 @@ object PackageCodeCollector {
             blocked.add(key)
             prefs.packageCodeDismissed = blocked.takeLast(200).joinToString("|")
         }
+        // 点"已取"就是这条用例的收尾，注入值跟着一起清
+        clearPrefs(prefs)
         prefs.packageCode = ""
         current(context, force = true)
     }
