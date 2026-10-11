@@ -90,7 +90,8 @@ object GameInfoSource {
         val raw = HookDock.gameInfoRaw()
         if (raw.isBlank()) return null
         val parts = raw.split('|')
-        if (parts.size != 5) return null
+        // 第 6 段是进程号（GraphicsApiSource 用来分辨重开的一局），老记录没有也照样读
+        if (parts.size < 5) return null
         val pkg = parts[0]
         val at = parts[4].toLongOrNull() ?: return null
         if (System.currentTimeMillis() - at > STALE_MS) return null

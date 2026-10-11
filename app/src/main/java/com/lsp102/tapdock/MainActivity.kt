@@ -193,6 +193,29 @@ class MainActivity : AppCompatActivity() {
         pkgPermRow()
         alignRow()
         maxWidthRow()
+        switchRow(
+            R.drawable.ic_tile_api_vulkan, R.string.opt_api_badge, R.string.sub_api_badge,
+            prefs.apiBadge,
+        ) {
+            prefs.apiBadge = it
+            syncToHook()
+        }
+        switchRow(
+            R.drawable.ic_tile_api_unknown, R.string.opt_api_unknown, R.string.sub_api_unknown,
+            prefs.apiBadgeUnknown,
+        ) {
+            prefs.apiBadgeUnknown = it
+            syncToHook()
+        }
+        switchRow(
+            R.drawable.ic_tile_api_other, R.string.opt_api_history, R.string.sub_api_history,
+            prefs.apiHistoryEnabled,
+        ) {
+            prefs.apiHistoryEnabled = it
+            // 这条开关的意思就是"别留底"，关掉时把已经攒下的清掉
+            if (!it) prefs.apiHistory = ""
+            syncToHook()
+        }
         sectionHeader(R.drawable.ic_row_color, R.string.sec_progress)
         colorRow()
         switchRow(R.drawable.ic_music_note, R.string.opt_album_bg, R.string.sub_album, prefs.albumArtBg) {

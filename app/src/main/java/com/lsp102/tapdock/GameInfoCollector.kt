@@ -13,11 +13,16 @@ import java.io.DataOutputStream
  * 三个数各自的来路：
  *  - 分辨率：`dumpsys gfxinfo <pkg>` 的 GraphicBuffer 表，行形状 `154 ( 192) x 154`（宽 (stride) x 高），
  *    取面积最大的一行 —— 那就是游戏自己提交的 swapchain 尺寸，不是屏幕尺寸。
- *  - 图形 API：认的是进程有没有映射**厂商 Vulkan 驱动本体**（`/vendor/lib64/hw/vulkan.adreno.so` 这一类），
- *    不是 `libvulkan.so`：后者是 `/system` 里的加载桩，桌面和 SystemUI 都挂着它，照它判等于所有游戏都算有 VK。
+ *  - 图形 API：认的是进程**实际映射了哪门子图形库**，不是游戏叫什么、也不是它是不是 Unity 打的包：
+ *    Vulkan 那条认厂商驱动本体（`/vendor/lib64/hw/vulkan.adreno.so` 这一类），不是 `libvulkan.so`：
+ *    后者是 `/system` 里的加载桩，桌面和 SystemUI 都挂着它，照它判等于所有游戏都算有 VK。
  *    GLES 那侧同理不可信 —— HWUI 自己必挂 `libGLESv2*`（实测桌面进程 7 行），所以两边同时命中不代表游戏在用 GL。
- *    结论只给一个：驱动在 = VULKAN，只有 swiftshader = VK(软件)，否则 = GLES。
+ *    ANGLE 认路径里带 `angle` 的库本体（`libEGL_angle.so` / `libGLESv2_angle.so` 这一类）：
+ *    ANGLE 是把 GLES 翻译成 Vulkan 跑，所以它**一定**也会映射厂商 vulkan 驱动 —— 判 API 时 ANGLE 排在驱动前面，
+ *    不然所有跑 ANGLE 的游戏都会被误报成原生 Vulkan。
+ *    结论只给一个：ANGLE > 厂商 Vulkan 驱动 = VULKAN > 只有 swiftshader = VK(软件) > 只有 GLES 桩 = GLES > 未知。
  *    实测：终末地映射 vulkan.adreno.so → VULKAN；桌面 / SystemUI 无驱动 → GLES。
+ *    每次认出来（未知除外）都记一笔历史，Dock 上能给没在跑的游戏显示"上次检测到的 API"，见 [recordApi]。
  *  - 帧率：`Total frames rendered` 是进程累计提交帧数，本对象留着上一次的读数做差分。
  *    只 dump 一次 gfxinfo，两次读数之间隔多久就除多久；第一次没有参照，那格留空。
  */
@@ -27,11 +32,15 @@ object GameInfoCollector {
 
     /**
      * K 行只列厂商 Vulkan 驱动（`vulkan.xxx.so` / `libvulkan_xxx.so` / swiftshader），
-     * 加载桩 `libvulkan.so` 匹配不上 —— 它谁都有。`pidof -s` 防止同名多进程把路径拼坏。
+     * 加载桩 `libvulkan.so` 匹配不上 —— 它谁都有。A 行只列 ANGLE 本体（路径含 angle 的 .so）。
+     * P 行是这一帧读到的进程号：Hook 侧拿它分辨"同一个游戏换了进程"，别把上一局的结论当本局的。
+     * `pidof -s` 防止同名多进程把路径拼坏。
      */
     private const val SCRIPT =
         "P=\$(pidof -s %1\$s); [ -z \"\$P\" ] || { " +
+            "echo \"P \$P\"; " +
             "echo \"K \$(grep -oE '/[^ ]*(vulkan\\.[a-z0-9_-]+|vk_swiftshader|libvulkan_[a-z0-9_-]+)\\.so' /proc/\$P/maps 2>/dev/null | sort -u | head -2 | tr '\\n' ' ')\"; " +
+            "echo \"A \$(grep -ioE '/[^ ]*angle[^ ]*\\.so' /proc/\$P/maps 2>/dev/null | sort -u | head -2 | tr '\\n' ' ')\"; " +
             "echo \"G \$(grep -c libGLESv2 /proc/\$P/maps 2>/dev/null)\"; }; " +
             "D=\$(dumpsys gfxinfo %1\$s 2>/dev/null); " +
             "echo \"T \$(echo \"\$D\" | grep -m1 -oE 'Total frames rendered: *[0-9]+' | grep -oE '[0-9]+')\"; " +
@@ -49,16 +58,20 @@ object GameInfoCollector {
     fun collect(context: Context, pkg: String): Boolean {
         val out = runSu(pkg) ?: return false
         var drivers: List<String> = emptyList()
+        var angle: List<String> = emptyList()
         var gles = 0
         var bestW = 0
         var bestH = 0
         var bestArea = 0
         var frames = -1L
+        var pid = 0
         out.lineSequence().forEach { line ->
             when {
                 line.startsWith("K ") -> drivers = line.substring(2).split(' ').filter { it.isNotEmpty() }
+                line.startsWith("A ") -> angle = line.substring(2).split(' ').filter { it.isNotEmpty() }
                 line.startsWith("G ") -> gles = line.substring(2).trim().toIntOrNull() ?: 0
                 line.startsWith("T ") -> frames = line.substring(2).trim().toLongOrNull() ?: -1L
+                line.startsWith("P ") -> pid = line.substring(2).trim().toIntOrNull() ?: 0
                 else -> {
                     val m = BUFFER.find(line) ?: return@forEach
                     val w = m.groupValues[1].toIntOrNull() ?: return@forEach
@@ -77,15 +90,42 @@ object GameInfoCollector {
         }
         val realVk = drivers.any { !it.contains("swiftshader") }
         val api = when {
+            angle.isNotEmpty() -> "ANGLE"
             realVk -> "VULKAN"
             drivers.isNotEmpty() -> "VK(软件)"
             gles > 0 -> "GLES"
             else -> "未知"
         }
         val fps = fpsText(pkg, frames)
-        DockPrefs(context).gameInfo = "$pkg|$api|${bestW}x$bestH|$fps|${System.currentTimeMillis()}"
+        DockPrefs(context).let { prefs ->
+            prefs.gameInfo =
+                "$pkg|$api|${bestW}x$bestH|$fps|${System.currentTimeMillis()}|$pid"
+            if (api != "未知" && prefs.apiHistoryEnabled) recordApi(prefs, pkg, api)
+        }
         android.util.Log.i(TAG, "collected $pkg: $api ${bestW}x$bestH fps=$fps frames=$frames")
         return true
+    }
+
+    /** 历史条目数上限 / 保留天数：超出就丢，Dock 只拿来显示"上次检测到的 API" */
+    private const val HISTORY_MAX = 12
+    private const val HISTORY_KEEP_MS = 30L * 24 * 60 * 60 * 1000
+
+    /**
+     * 把这一局确认到的 API 记进历史：同一个包名只留最新一条、排在最前。
+     * 存的是"上次确认"而不是"现在在用"，Hook 侧靠时间戳和 pid 把它和当前会话分开显示。
+     */
+    private fun recordApi(prefs: DockPrefs, pkg: String, api: String) {
+        val now = System.currentTimeMillis()
+        val rows = ArrayList<String>(HISTORY_MAX + 1)
+        rows.add("$pkg|$api|$now")
+        prefs.apiHistory.split(';').forEach { row ->
+            if (rows.size >= HISTORY_MAX) return@forEach
+            val cols = row.split('|')
+            val at = cols.getOrNull(2)?.toLongOrNull() ?: return@forEach
+            if (cols.size < 3 || cols[0] == pkg || now - at > HISTORY_KEEP_MS) return@forEach
+            rows.add(row)
+        }
+        prefs.apiHistory = rows.joinToString(";")
     }
 
     /** 与上一拍做差分；没有可比读数就返回空串，让面板那格留空而不是写 0 */

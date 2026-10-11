@@ -94,6 +94,8 @@ object HookDock {
     const val EXTRA_PKG = "pkgcode"
     const val EXTRA_NCARD = "ncard"
     const val EXTRA_MAXW = "maxw"
+    const val EXTRA_API_BADGE = "api_badge"
+    const val EXTRA_API_BADGE_UNKNOWN = "api_badge_unknown"
     const val ALIGN_LEFT = "left"
     const val ALIGN_RIGHT = "right"
 
@@ -257,8 +259,20 @@ object HookDock {
     /** Dock 最大宽度（dp，0 = 不限）（App 里的档位，走同一套三级通道） */
     private val overrideMaxW = AtomicReference<Int>(null)
 
-    /** App 侧 root 采到的游戏信息（`pkg|api|宽x高|帧率|时间戳`），随 Provider 的 query 回来 */
+    /** App 侧 root 采到的游戏信息（`pkg|api|宽x高|帧率|时间戳|进程号`），随 Provider 的 query 回来 */
     private val overrideGame = AtomicReference<String>(null)
+
+    /** 游戏 tile 换成图形 API 图标的开关（同上，走三级通道） */
+    private val overrideApiBadge = AtomicReference<Boolean?>(null)
+
+    /** 认不出 API 时是否也换成"未知"图标 */
+    private val overrideApiBadgeUnknown = AtomicReference<Boolean?>(null)
+
+    /** App 侧攒的图形 API 历史（`pkg|api|时间戳;…`），只给面板的"上次"那行用 */
+    private val overrideApiHistory = AtomicReference<String>(null)
+
+    /** 上一次画在游戏 tile 上的 API 结论（包名 + 类型），换结论才 setImageDrawable */
+    private var lastGameApi = ""
     private var lastPercent: Int? = null
     private var lastStates: BooleanArray? = null
 
@@ -786,6 +800,18 @@ object HookDock {
                     overrideMaxW.set(intent.getIntExtra(EXTRA_MAXW, DEFAULT_MAXW_DP))
                     main.post { applyContent() }
                 }
+                if (intent.hasExtra(EXTRA_API_BADGE)) {
+                    overrideApiBadge.set(intent.getBooleanExtra(EXTRA_API_BADGE, true))
+                    // 一关就把检测模块整块停用：会话状态清掉，tile 立刻退回手柄
+                    syncApiDetector()
+                    main.post { applyContent() }
+                }
+                if (intent.hasExtra(EXTRA_API_BADGE_UNKNOWN)) {
+                    overrideApiBadgeUnknown.set(
+                        intent.getBooleanExtra(EXTRA_API_BADGE_UNKNOWN, false)
+                    )
+                    main.post { applyContent() }
+                }
                 if (intent.hasExtra(EXTRA_THUMB)) {
                     overrideThumb.set(intent.getBooleanExtra(EXTRA_THUMB, true))
                     // 封面一收一放会改变整条宽度，作废状态缓存立刻重排
@@ -1001,6 +1027,12 @@ object HookDock {
                         if (pci >= 0) PackageCodeSource.ingest(c.getString(pci) ?: "")
                         val gii = c.getColumnIndex("game")
                         if (gii >= 0) overrideGame.set(c.getString(gii) ?: "")
+                        val abi = c.getColumnIndex("apibadge")
+                        if (abi >= 0) overrideApiBadge.set(c.getInt(abi) == 1)
+                        val abui = c.getColumnIndex("apibunk")
+                        if (abui >= 0) overrideApiBadgeUnknown.set(c.getInt(abui) == 1)
+                        val ahi = c.getColumnIndex("apihist")
+                        if (ahi >= 0) overrideApiHistory.set(c.getString(ahi) ?: "")
                         val mwi = c.getColumnIndex("maxw")
                         if (mwi >= 0) overrideMaxW.set(c.getInt(mwi))
                         if (ai >= 0) overrideAlignRight.set(c.getString(ai) != ALIGN_LEFT)
@@ -1023,6 +1055,16 @@ object HookDock {
         }
         // 配置里"接管横幅"变了就顺手下发（内部按上一次状态判重，不会每 3 秒写一次设置）
         syncHeadsUpSetting(ctx)
+        // 图形 API：把这一拍的帧和历史喂给检测器（它自己不读通道，UI 只管问它要结论）
+        syncApiDetector()
+        GraphicsApiSource.observeGraphicsApi(gameInfoRaw(), apiHistoryRaw())
+    }
+
+    /** 检测模块跟着"图形 API 标识"那颗开关走：关掉 = 停用，不留会话状态 */
+    private fun syncApiDetector() {
+        val on = apiBadge()
+        GraphicsApiSource.enabled = on
+        if (!on) GraphicsApiSource.stopObserving()
     }
 
     /** 刷新状态图标 + 进度填充 */
@@ -1080,6 +1122,17 @@ object HookDock {
             val res = WIFI_LEVEL_ICONS[wifiLevel]
             snapshot.forEach { b ->
                 ModuleRes.drawable(context, res)?.let { b.icons[WIFI_ICON].setImageDrawable(it) }
+            }
+        }
+        // 游戏 tile 按这一局实测到的图形 API 换图形。结论没变就不重设图，理由同上（WiFi 分格）
+        val gameApi = GraphicsApiSource.currentGraphicsApi()
+        val gameSig = if (apiBadge()) "${gameApi?.packageName}:${gameApi?.apiType}" else "off"
+        if (gameSig != lastGameApi) {
+            lastGameApi = gameSig
+            XposedBridge.log("[TapDock] game tile api = ${gameApi?.label ?: "无"}")
+            val res = gameTileRes(gameApi)
+            snapshot.forEach { b ->
+                ModuleRes.drawable(context, res)?.let { b.icons[GAME_ICON].setImageDrawable(it) }
             }
         }
         val warn = privacyWarn()
@@ -1437,12 +1490,43 @@ object HookDock {
     }
 
     /**
-     * App 侧 root 采集回来的游戏信息：`pkg|api|宽x高|帧率|时间戳`，空 = 还没采到。
+     * App 侧 root 采集回来的游戏信息：`pkg|api|宽x高|帧率|时间戳|进程号`，空 = 还没采到。
      *
      * 只认 Provider 那一拍：模块 App 的偏好文件在这台机器上从不落盘（见 DockPrefs.gameInfo），
      * XSharedPreferences 读到的永远是空串。
      */
     internal fun gameInfoRaw(): String = overrideGame.get() ?: ""
+
+    /** App 侧攒下来的图形 API 历史：`pkg|api|时间戳;…`，空 = 一条都没有 */
+    internal fun apiHistoryRaw(): String = overrideApiHistory.get() ?: ""
+
+    /** 游戏 tile 换成图形 API 图标（App 里的开关，默认开） */
+    internal fun apiBadge(): Boolean =
+        overrideApiBadge.get() ?: (loadPrefs()?.getBoolean("api_badge", true) ?: true)
+
+    /** 认不出 API 时是否也画"未知"图形（App 里的开关，默认关） */
+    internal fun apiBadgeUnknown(): Boolean =
+        overrideApiBadgeUnknown.get()
+            ?: (loadPrefs()?.getBoolean("api_badge_unknown", false) ?: false)
+
+    /**
+     * 游戏 tile 这一格画哪张图。
+     *
+     * 开关关着、或这一局还没有结论 → 手柄；认不出 API 默认也留手柄 —— "未知"本身不是信息，
+     * 画一颗圈会让人以为检测到了什么，想要的人在设置里单独打开。
+     */
+    private fun gameTileRes(info: GraphicsApiInfo?): Int {
+        val res = when (info?.apiType) {
+            GraphicsApiType.VULKAN -> com.lsp102.tapdock.R.drawable.ic_tile_api_vulkan
+            GraphicsApiType.OPENGL_ES -> com.lsp102.tapdock.R.drawable.ic_tile_api_gles
+            GraphicsApiType.ANGLE -> com.lsp102.tapdock.R.drawable.ic_tile_api_angle
+            GraphicsApiType.OTHER -> com.lsp102.tapdock.R.drawable.ic_tile_api_other
+            GraphicsApiType.UNKNOWN ->
+                if (apiBadgeUnknown()) com.lsp102.tapdock.R.drawable.ic_tile_api_unknown else 0
+            null -> 0
+        }
+        return if (res == 0) com.lsp102.tapdock.R.drawable.ic_tile_game else res
+    }
 
     /** 点验证码：复制到剪贴板，省得在状态栏和短信之间来回抄 */
     private fun copyOtp(context: Context) {

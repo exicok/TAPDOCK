@@ -1247,8 +1247,8 @@ object ControlPanel {
         // 游戏信息行：只有前台是游戏且 Game SDK 报得出数据时才占一行
         val game = TextView(ctx).apply {
             textSize = 11f
-            // 五个字段一行放不下，允许折成两行，别把帧率挤没
-            maxLines = 2
+            // 五个字段一行放不下，加上图形 API 那条详情最多三行，别把帧率挤没
+            maxLines = 3
             gravity = Gravity.CENTER
             setTextColor(accent)
             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -1370,7 +1370,9 @@ object ControlPanel {
         gameInfo?.let { tv ->
             GameInfoSource.refresh(ctx)
             val gi = GameInfoSource.peek(ctx)
+            val api = GraphicsApiSource.currentGraphicsApi()
             if (gi == null) {
+                // 没有游戏在跑（或记录已过期）就整行收起：历史那条"上次 …"曾常驻状态区，用户不要这种挂法
                 tv.visibility = View.GONE
             } else {
                 val hz = refreshHz(ctx)
@@ -1381,12 +1383,53 @@ object ControlPanel {
                     else -> null
                 }
                 // 帧数是两次采样之间的差分，头一格必空；这时只报刷新率，不写 0 帧冒充
-                tv.text = listOfNotNull(
-                    "游戏 ${gi.label}", gi.api, gi.resolution, rate,
+                val head = listOfNotNull(
+                    "游戏 ${gi.label}", api?.label ?: gi.api, gi.resolution, rate,
                     if (GameInfoSource.background) "后台" else "前台",
                 ).joinToString(" · ")
+                tv.text = if (api == null) head else "$head\n${apiDetailText(api)}"
                 tv.visibility = View.VISIBLE
             }
+        }
+    }
+
+    /**
+     * 图形 API 那行下面的详情：状态 / 来源 / 置信 / 时间。
+     *
+     * 走到这里的一定是当前会话的帧（[GraphicsApiSource.currentGraphicsApi] 只给这一档），
+     * 所以"已确认"三个字不会冤枉；置信那一档留着"中"是因为 GLES 只映射到加载桩，属推断不是证据。
+     */
+    private fun apiDetailText(info: GraphicsApiInfo): String {
+        val status = when (info.status) {
+            ApiDetectionStatus.SESSION_CONFIRMED -> "本会话已确认"
+            ApiDetectionStatus.LAST_KNOWN -> "上次会话"
+            ApiDetectionStatus.SUPPORT_ONLY -> "仅设备支持"
+            ApiDetectionStatus.UNDETERMINED -> "认不出来"
+        }
+        val source = when (info.source) {
+            ApiDetectionSource.RUNTIME_PROCESS_MAPS -> "进程映射"
+            ApiDetectionSource.LOCAL_HISTORY -> "本地历史"
+            ApiDetectionSource.NONE -> "无来源"
+        }
+        val confidence = when (info.confidence) {
+            ApiConfidence.HIGH -> "高"
+            ApiConfidence.MEDIUM -> "中"
+            ApiConfidence.NONE -> "无"
+        }
+        val pid = if (info.processId > 0) "pid ${info.processId}" else null
+        return listOfNotNull(
+            status, "来源$source", "置信$confidence", pid, "采于${timeAgo(info.lastDetectedTime)}",
+        ).joinToString(" · ")
+    }
+
+    /** 相对时间：绝对时间戳在这行里太长，"多久以前"才是用户要的那个数 */
+    private fun timeAgo(at: Long): String {
+        val s = (System.currentTimeMillis() - at) / 1000
+        return when {
+            s < 60 -> "${s} 秒前"
+            s < 3600 -> "${s / 60} 分钟前"
+            s < 86400 -> "${s / 3600} 小时前"
+            else -> "${s / 86400} 天前"
         }
     }
 

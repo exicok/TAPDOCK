@@ -107,7 +107,7 @@ class DockPrefs(context: Context) {
         set(v) = sp.edit().putInt(KEY_DOCK_MAX_DP, v).apply()
 
     /**
-     * App 侧 root 采集的游戏信息：`pkg|api|宽x高|帧率|时间戳`，帧率没差分出来就是空段。
+     * App 侧 root 采集的游戏信息：`pkg|api|宽x高|帧率|时间戳|进程号`，帧率没差分出来就是空段。
      *
      * Hook 侧不从文件读它，而是随 DockConfigProvider 的 query 拿同一份内存值：这台机器上 LSPosed
      * 给模块 App 装了 preferences hook，偏好从不落盘（连 commit 都不生成文件），
@@ -116,6 +116,29 @@ class DockPrefs(context: Context) {
     var gameInfo: String
         get() = sp.getString(KEY_GAME_INFO, "") ?: ""
         set(v) = sp.edit().putString(KEY_GAME_INFO, v).apply()
+
+    /**
+     * 前台游戏那颗 tile 换成它实际用的图形 API 图标（默认开）。
+     * 关掉就回到原来的手柄图标，检测本身照旧跑（面板还要显示 API 文字）。
+     */
+    var apiBadge: Boolean
+        get() = sp.getBoolean(KEY_API_BADGE, true)
+        set(v) = sp.edit().putBoolean(KEY_API_BADGE, v).apply()
+
+    /** 认不出 API 时是否也换成"未知"图标（默认关：拿不准就还是手柄，别画个误导人的徽标） */
+    var apiBadgeUnknown: Boolean
+        get() = sp.getBoolean(KEY_API_BADGE_UNKNOWN, false)
+        set(v) = sp.edit().putBoolean(KEY_API_BADGE_UNKNOWN, v).apply()
+
+    /** 每确认一次图形 API 就记一笔历史，给没在跑的游戏显示"上次检测到的 API"（默认开） */
+    var apiHistoryEnabled: Boolean
+        get() = sp.getBoolean(KEY_API_HISTORY_ENABLED, true)
+        set(v) = sp.edit().putBoolean(KEY_API_HISTORY_ENABLED, v).apply()
+
+    /** 图形 API 历史：`pkg|api|时间戳` 用 `;` 连接，最新在前，由 GameInfoCollector 维护 */
+    var apiHistory: String
+        get() = sp.getString(KEY_API_HISTORY, "") ?: ""
+        set(v) = sp.edit().putString(KEY_API_HISTORY, v).apply()
 
     /** SystemUI 枚举回来的系统控制块目录（spec<TAB>label<TAB>kind，逐行） */
     var sysCatalog: List<SysEntry>
@@ -151,6 +174,10 @@ class DockPrefs(context: Context) {
         private const val KEY_NOTIF_CARD = "notif_card"
         private const val KEY_DOCK_MAX_DP = "dock_max_dp"
         private const val KEY_GAME_INFO = "game_info"
+        private const val KEY_API_BADGE = "api_badge"
+        private const val KEY_API_BADGE_UNKNOWN = "api_badge_unknown"
+        private const val KEY_API_HISTORY_ENABLED = "api_history_enabled"
+        private const val KEY_API_HISTORY = "api_history"
 
         /** 默认上限：状态栏里留出足够位置给左边的时钟 / 通知图标 */
         const val DEFAULT_DOCK_MAX_DP = 220

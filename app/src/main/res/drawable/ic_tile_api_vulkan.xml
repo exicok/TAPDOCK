@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Vulkan：认到厂商驱动本体。画成一个实心 V，13dp 下只剩轮廓，笔画必须粗、必须填满 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,19.4L4.4,5.0L8.2,5.0L12,11.8L15.8,5.0L19.6,5.0Z" />
+</vector>
