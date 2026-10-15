@@ -16,6 +16,20 @@
 
     <string name="nav_dock">Dock</string>
     <string name="nav_panel">控制中心</string>
+    <string name="nav_about">关于</string>
+
+    <string name="sec_about">关于</string>
+    <string name="opt_libraries">开源引用库</string>
+    <string name="sub_libraries">这个 APK 用到的第三方库和各自的许可证</string>
+    <string name="libraries_title">开源引用库</string>
+    <string name="libraries_intro">直接依赖这几项，许可证一律 Apache License 2.0；传递依赖也都是 AndroidX / JetBrains 的组件，同属 Apache 2.0。Xposed API 只在编译期参与，APK 里不含它的字节码，运行时由 LSPosed 注入。点任意一行看许可证要点。</string>
+    <string name="lib_sub_fmt">%1$s · %2$s</string>
+    <string name="lib_sub_compileonly_fmt">%1$s · %2$s（仅编译期）</string>
+    <string name="lib_dialog_title">Apache License 2.0</string>
+    <string name="lib_dialog_meta">%1$s\n坐标：%2$s\n版本：%3$s\n上游：%4$s</string>
+    <string name="lib_open_source">看许可证原文</string>
+    <string name="lib_no_browser">这台机器上没有能打开链接的应用</string>
+    <string name="license_apache_body">下面这段是本应用写的通俗摘要，不是官方译文，具有法律效力的以原文为准。\n\n· 商用、修改、再分发都可以，免费，不需要授权费\n· 分发时要带上这份许可证，并保留原有的版权、许可和 NOTICE 归属声明\n· 改过哪些文件要标注出来\n· 贡献者同时授予专利许可，用它的产品不会因为这块专利被起诉\n· 不得借用上游的名称和商标做宣传\n· 软件按原样提供，不带任何担保，出问题作者和贡献者不承担责任\n· 衍生产品不得在名称上误导上游</string>
     <string name="pill_cards">卡片顺序</string>
     <string name="pill_downloaders">下载器</string>
     <string name="sub_hook_switch">关闭后状态栏和任务栏里的 Dock 一起隐藏</string>

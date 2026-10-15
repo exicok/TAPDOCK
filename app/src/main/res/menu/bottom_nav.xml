@@ -8,4 +8,8 @@
         android:id="@+id/tab_panel"
         android:icon="@drawable/ic_nav_panel"
         android:title="@string/nav_panel" />
+    <item
+        android:id="@+id/tab_about"
+        android:icon="@drawable/ic_nav_about"
+        android:title="@string/nav_about" />
 </menu>

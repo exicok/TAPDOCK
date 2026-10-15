@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 依赖包：引用库页每行的图标 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2.5 L21,7 L21,17 L12,21.5 L3,17 L3,7 Z M12,4.6 L5,8.1 L5,15.9 L12,19.4 L19,15.9 L19,8.1 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,9.2 L15.4,10.9 L15.4,14 L12,15.7 L8.6,14 L8.6,10.9 Z" />
+</vector>

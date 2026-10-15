@@ -34,6 +34,11 @@
             android:exported="false"
             android:label="@string/card_order_title" />
 
+        <activity
+            android:name=".LibrariesActivity"
+            android:exported="false"
+            android:label="@string/libraries_title" />
+
         <!-- Hook 侧轮询读取配置的入口（即使广播丢失/XSharedPreferences 失效也生效） -->
         <provider
             android:name=".DockConfigProvider"

@@ -89,6 +89,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<BottomNavigationView>(R.id.bottom_nav).setOnItemSelectedListener { item ->
             tab = when (item.itemId) {
                 R.id.tab_panel -> TAB_PANEL
+                R.id.tab_about -> TAB_ABOUT
                 else -> TAB_DOCK
             }
             renderTab()
@@ -152,6 +153,7 @@ class MainActivity : AppCompatActivity() {
         previewCard = null
         when (tab) {
             TAB_PANEL -> panelTab()
+            TAB_ABOUT -> aboutTab()
             else -> dockTab()
         }
     }
@@ -223,6 +225,17 @@ class MainActivity : AppCompatActivity() {
         switchRow(R.drawable.ic_row_chart, R.string.opt_cpu_chart, R.string.sub_chart, prefs.cpuChart) {
             prefs.cpuChart = it
             syncToHook()
+        }
+    }
+
+    /**
+     * 关于分类：目前只有引用库一个入口，以后加更新日志、反馈也放这儿。
+     * 顶部三分类导航的第三项（res/menu/bottom_nav.xml 的 tab_about）。
+     */
+    private fun aboutTab() {
+        sectionHeader(R.drawable.ic_nav_about, R.string.sec_about)
+        actionRow(R.drawable.ic_lib, R.string.opt_libraries, R.string.sub_libraries) {
+            startActivity(Intent(this, LibrariesActivity::class.java))
         }
     }
 
@@ -587,6 +600,7 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAB_DOCK = 0
         private const val TAB_PANEL = 1
+        private const val TAB_ABOUT = 2
 
         /** Dock 最大宽度档位（dp，0 = 不限） */
         private val MAX_WIDTHS = intArrayOf(160, 220, 280, 0)
