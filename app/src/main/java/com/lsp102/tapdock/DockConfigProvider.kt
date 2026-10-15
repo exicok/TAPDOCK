@@ -44,8 +44,6 @@ class DockConfigProvider : ContentProvider() {
                     prefs.dockMaxDp,
                     prefs.gameInfo,
                     if (prefs.apiBadge) 1 else 0,
-                    if (prefs.apiBadgeUnknown) 1 else 0,
-                    prefs.apiHistory,
                 )
             )
         }
@@ -96,7 +94,7 @@ class DockConfigProvider : ContentProvider() {
         val COLUMNS = arrayOf(
             "show", "align", "pcolor", "dl_pkgs", "card_order", "nyan", "album", "thumb", "cpu",
             "badge", "otp", "pkgon", "pkgcode", "ncard", "maxw", "game",
-            "apibadge", "apibunk", "apihist",
+            "apibadge",
         )
     }
 }

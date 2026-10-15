@@ -29,7 +29,6 @@ object SystemTiles {
     const val ACTION_SNAPSHOT = "com.lsp102.tapdock.SYS_SNAPSHOT"
     const val EXTRA_SPEC = "spec"
     const val EXTRA_LONG = "long_click"
-    const val EXTRA_SNAPSHOT = "snapshot"
 
     private const val FACTORY_CLS = "com.android.systemui.qs.tileimpl.QSFactoryImpl"
     private const val CATALOG_URI = "content://com.lsp102.tapdock.config/state"
@@ -64,8 +63,6 @@ object SystemTiles {
 
     /** spec -> 最近一次快照，引擎和宿主共用同一份读接口 */
     private val snapshots = LinkedHashMap<String, Snapshot>()
-
-    private var lastAbsorbMs = 0L
 
     /**
      * 每个宿主进程都调一次。isEngine = 当前进程是 SystemUI，只有它能碰磁贴本体。
@@ -275,11 +272,7 @@ object SystemTiles {
                 ons.getOrElse(i) { "0" } == "1", avails.getOrElse(i) { "1" } == "1",
             )
         }
-        lastAbsorbMs = System.currentTimeMillis()
     }
-
-    /** 宿主侧最后一次收到快照的时间（SystemUI 挂了 / 没回报时面板能知道） */
-    fun lastUpdateMs(): Long = lastAbsorbMs
 
     /** 引擎：枚举内置 spec + 第三方 TileService，逐个建磁贴取标签，再写回 App 的 Provider */
     private fun harvestCatalog() {

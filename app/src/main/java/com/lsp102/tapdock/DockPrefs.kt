@@ -125,21 +125,6 @@ class DockPrefs(context: Context) {
         get() = sp.getBoolean(KEY_API_BADGE, true)
         set(v) = sp.edit().putBoolean(KEY_API_BADGE, v).apply()
 
-    /** 认不出 API 时是否也换成"未知"图标（默认关：拿不准就还是手柄，别画个误导人的徽标） */
-    var apiBadgeUnknown: Boolean
-        get() = sp.getBoolean(KEY_API_BADGE_UNKNOWN, false)
-        set(v) = sp.edit().putBoolean(KEY_API_BADGE_UNKNOWN, v).apply()
-
-    /** 每确认一次图形 API 就记一笔历史，给没在跑的游戏显示"上次检测到的 API"（默认开） */
-    var apiHistoryEnabled: Boolean
-        get() = sp.getBoolean(KEY_API_HISTORY_ENABLED, true)
-        set(v) = sp.edit().putBoolean(KEY_API_HISTORY_ENABLED, v).apply()
-
-    /** 图形 API 历史：`pkg|api|时间戳` 用 `;` 连接，最新在前，由 GameInfoCollector 维护 */
-    var apiHistory: String
-        get() = sp.getString(KEY_API_HISTORY, "") ?: ""
-        set(v) = sp.edit().putString(KEY_API_HISTORY, v).apply()
-
     /** SystemUI 枚举回来的系统控制块目录（spec<TAB>label<TAB>kind，逐行） */
     var sysCatalog: List<SysEntry>
         get() = SysCatalog.decode(sp.getString(KEY_SYS_CATALOG, "") ?: "")
@@ -175,9 +160,6 @@ class DockPrefs(context: Context) {
         private const val KEY_DOCK_MAX_DP = "dock_max_dp"
         private const val KEY_GAME_INFO = "game_info"
         private const val KEY_API_BADGE = "api_badge"
-        private const val KEY_API_BADGE_UNKNOWN = "api_badge_unknown"
-        private const val KEY_API_HISTORY_ENABLED = "api_history_enabled"
-        private const val KEY_API_HISTORY = "api_history"
 
         /** 默认上限：状态栏里留出足够位置给左边的时钟 / 通知图标 */
         const val DEFAULT_DOCK_MAX_DP = 220

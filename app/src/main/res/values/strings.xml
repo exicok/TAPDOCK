@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">TapDock</string>
-    <string name="app_subtitle">LSPosed 纯模块 · 基础任务栏 Dock</string>
 
     <string name="xposed_desc">AOSP 任务栏 Dock（基础版）：往系统状态栏/任务栏布局里注入一个黑色圆角 Dock 条，可靠左/靠右，可重启 SystemUI</string>
 
@@ -56,10 +55,6 @@
 
     <string name="opt_api_badge">前台游戏的图形 API 标识</string>
     <string name="sub_api_badge">那颗游戏图标换成这一局实测到的接口：Vulkan / OpenGL ES / ANGLE</string>
-    <string name="opt_api_unknown">认不出接口时也显示标识</string>
-    <string name="sub_api_unknown">关掉它就只在认出来时换图标，认不出仍是手柄 —— 未知不是信息</string>
-    <string name="opt_api_history">保存图形 API 历史</string>
-    <string name="sub_api_history">控制页给刚玩过的游戏留一行"上次实测"，最多 12 款、30 天内；关掉即清空</string>
 
     <string name="btn_restart_systemui">重启 SystemUI（使设置生效）</string>
     <string name="restart_ok">SystemUI 已重启</string>
@@ -68,15 +63,11 @@
     <string name="sec_progress">进度显示</string>
     <string name="opt_progress_color">进度条颜色</string>
     <string name="opt_download_apps">下载进度（读取下载器通知）</string>
-    <string name="dl_summary_fmt">已选 %1$d 个下载器应用</string>
-    <string name="dl_summary_all">跟踪全部应用的通知</string>
-    <string name="btn_dl_pick">选择下载器应用…</string>
     <string name="opt_card_order">控制中心卡片</string>
     <string name="opt_nyan">进度条彩虹猫风格（流动）</string>
     <string name="opt_album_bg">播放音乐时 Dock 背景显示模糊封面</string>
     <string name="opt_album_thumb">播放音乐时在进度条左侧显示封面小图</string>
     <string name="opt_cpu_chart">状态区资源占用图（CPU 全核心 / GPU / 内存 / zram）</string>
-    <string name="btn_card_pick">排列卡片顺序…</string>
     <string name="card_order_title">控制中心卡片</string>
     <string name="card_order_hint">长按卡片拖动换位；下方目录勾选后作为代理卡片加入面板</string>
     <string name="card_order_reset">恢复默认</string>

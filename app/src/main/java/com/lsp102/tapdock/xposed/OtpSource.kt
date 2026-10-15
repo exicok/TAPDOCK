@@ -19,7 +19,7 @@ import de.robv.android.xposed.XposedBridge
  */
 object OtpSource {
 
-    class Code(val text: String, val pkg: String, val at: Long)
+    class Code(val text: String, val at: Long)
 
     /** 验证码在 Dock 上的停留时间（HookDock 按它安排到点撤下，改这里就行） */
     internal const val TTL_MS = 10_000L
@@ -35,7 +35,7 @@ object OtpSource {
     fun onPosted(sbn: StatusBarNotification) {
         val n = sbn.notification ?: return
         val code = extract(n) ?: return
-        current = Code(code, sbn.packageName, System.currentTimeMillis())
+        current = Code(code, System.currentTimeMillis())
         XposedBridge.log("[TapDock] otp captured from ${sbn.packageName}")
     }
 
@@ -47,10 +47,6 @@ object OtpSource {
             return null
         }
         return c
-    }
-
-    fun clear() {
-        current = null
     }
 
     private fun extract(n: Notification): String? {

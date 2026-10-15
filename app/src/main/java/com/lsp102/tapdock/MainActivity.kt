@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
@@ -13,8 +12,6 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
-import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -22,7 +19,6 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -198,22 +194,6 @@ class MainActivity : AppCompatActivity() {
             prefs.apiBadge,
         ) {
             prefs.apiBadge = it
-            syncToHook()
-        }
-        switchRow(
-            R.drawable.ic_tile_api_unknown, R.string.opt_api_unknown, R.string.sub_api_unknown,
-            prefs.apiBadgeUnknown,
-        ) {
-            prefs.apiBadgeUnknown = it
-            syncToHook()
-        }
-        switchRow(
-            R.drawable.ic_tile_api_other, R.string.opt_api_history, R.string.sub_api_history,
-            prefs.apiHistoryEnabled,
-        ) {
-            prefs.apiHistoryEnabled = it
-            // 这条开关的意思就是"别留底"，关掉时把已经攒下的清掉
-            if (!it) prefs.apiHistory = ""
             syncToHook()
         }
         sectionHeader(R.drawable.ic_row_color, R.string.sec_progress)

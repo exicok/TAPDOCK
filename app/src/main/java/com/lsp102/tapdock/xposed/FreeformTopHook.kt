@@ -56,6 +56,7 @@ object FreeformTopHook {
     /** WINDOWING_MODE_FREEFORM 是 @hide 常量，编译期的 android.jar 里没有，装 hook 时取一次 */
     private var freeformMode = -1
 
+
     fun hook(classLoader: ClassLoader) {
         val cls = XposedHelpers.findClassIfExists(ORGANIZER, classLoader)
         if (cls == null) {
@@ -73,6 +74,8 @@ object FreeformTopHook {
             override fun afterHookedMethod(param: XC_MethodHook.MethodHookParam) {
                 try {
                     applyTop(param.thisObject, param.args.getOrNull(0))
+                    // 标题栏刷过一遍按钮可见性，藏起来的最小化键要重新按下去
+                    FreeformCaptionHook.reapply()
                 } catch (t: Throwable) {
                     XposedBridge.log("[TapDock] 自由窗口处理失败: $t")
                 }

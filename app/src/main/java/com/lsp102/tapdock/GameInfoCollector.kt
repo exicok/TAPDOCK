@@ -1,7 +1,6 @@
 package com.lsp102.tapdock
 
 import android.content.Context
-import java.io.DataOutputStream
 
 /**
  * 用 root 采当前前台游戏的图形 API、渲染分辨率和帧率，结果写进 DockPrefs.gameInfo，
@@ -22,7 +21,6 @@ import java.io.DataOutputStream
  *    不然所有跑 ANGLE 的游戏都会被误报成原生 Vulkan。
  *    结论只给一个：ANGLE > 厂商 Vulkan 驱动 = VULKAN > 只有 swiftshader = VK(软件) > 只有 GLES 桩 = GLES > 未知。
  *    实测：终末地映射 vulkan.adreno.so → VULKAN；桌面 / SystemUI 无驱动 → GLES。
- *    每次认出来（未知除外）都记一笔历史，Dock 上能给没在跑的游戏显示"上次检测到的 API"，见 [recordApi]。
  *  - 帧率：`Total frames rendered` 是进程累计提交帧数，本对象留着上一次的读数做差分。
  *    只 dump 一次 gfxinfo，两次读数之间隔多久就除多久；第一次没有参照，那格留空。
  */
@@ -100,32 +98,9 @@ object GameInfoCollector {
         DockPrefs(context).let { prefs ->
             prefs.gameInfo =
                 "$pkg|$api|${bestW}x$bestH|$fps|${System.currentTimeMillis()}|$pid"
-            if (api != "未知" && prefs.apiHistoryEnabled) recordApi(prefs, pkg, api)
         }
         android.util.Log.i(TAG, "collected $pkg: $api ${bestW}x$bestH fps=$fps frames=$frames")
         return true
-    }
-
-    /** 历史条目数上限 / 保留天数：超出就丢，Dock 只拿来显示"上次检测到的 API" */
-    private const val HISTORY_MAX = 12
-    private const val HISTORY_KEEP_MS = 30L * 24 * 60 * 60 * 1000
-
-    /**
-     * 把这一局确认到的 API 记进历史：同一个包名只留最新一条、排在最前。
-     * 存的是"上次确认"而不是"现在在用"，Hook 侧靠时间戳和 pid 把它和当前会话分开显示。
-     */
-    private fun recordApi(prefs: DockPrefs, pkg: String, api: String) {
-        val now = System.currentTimeMillis()
-        val rows = ArrayList<String>(HISTORY_MAX + 1)
-        rows.add("$pkg|$api|$now")
-        prefs.apiHistory.split(';').forEach { row ->
-            if (rows.size >= HISTORY_MAX) return@forEach
-            val cols = row.split('|')
-            val at = cols.getOrNull(2)?.toLongOrNull() ?: return@forEach
-            if (cols.size < 3 || cols[0] == pkg || now - at > HISTORY_KEEP_MS) return@forEach
-            rows.add(row)
-        }
-        prefs.apiHistory = rows.joinToString(";")
     }
 
     /** 与上一拍做差分；没有可比读数就返回空串，让面板那格留空而不是写 0 */

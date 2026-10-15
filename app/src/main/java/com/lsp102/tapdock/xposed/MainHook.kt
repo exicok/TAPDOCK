@@ -13,6 +13,7 @@ class MainHook : IXposedHookLoadPackage {
                 FpsMonitor.hook()
                 StatusBarHook.hook(lpparam.classLoader)
                 FreeformTopHook.hook(lpparam.classLoader)
+                FreeformCaptionHook.hook(lpparam.classLoader)
             }
 
             // 12L 任务栏（运行在桌面进程）
@@ -21,6 +22,7 @@ class MainHook : IXposedHookLoadPackage {
             -> {
                 FpsMonitor.hook()
                 TaskbarHook.hook(lpparam.classLoader)
+                RecentsLayoutHook.hook(lpparam.classLoader)
             }
         }
     }

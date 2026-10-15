@@ -37,7 +37,6 @@ object HookSync {
                     .putExtra(HookActions.EXTRA_NCARD, prefs.notifCard)
                     .putExtra(HookActions.EXTRA_MAXW, prefs.dockMaxDp)
                     .putExtra(HookActions.EXTRA_API_BADGE, prefs.apiBadge)
-                    .putExtra(HookActions.EXTRA_API_BADGE_UNKNOWN, prefs.apiBadgeUnknown)
                 context.sendBroadcast(intent)
             } catch (_: Exception) {
             }
@@ -224,8 +223,7 @@ object HookSync {
         const val EXTRA_NCARD = "ncard"
         const val EXTRA_MAXW = "maxw"
 
-        /** 游戏 tile 换成图形 API 图标 / 认不出时也换"未知"图标 */
+        /** 游戏 tile 换成图形 API 图标 */
         const val EXTRA_API_BADGE = "api_badge"
-        const val EXTRA_API_BADGE_UNKNOWN = "api_badge_unknown"
     }
 }

@@ -36,7 +36,6 @@ import android.telephony.TelephonyManager
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
@@ -48,7 +47,6 @@ import android.widget.Toast
 import androidx.core.view.doOnPreDraw
 import com.lsp102.tapdock.CardIds
 import com.lsp102.tapdock.CardSpec
-import com.lsp102.tapdock.PackageCodeCollector
 import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Proxy
 import java.text.SimpleDateFormat
@@ -1372,7 +1370,7 @@ object ControlPanel {
             val gi = GameInfoSource.peek(ctx)
             val api = GraphicsApiSource.currentGraphicsApi()
             if (gi == null) {
-                // 没有游戏在跑（或记录已过期）就整行收起：历史那条"上次 …"曾常驻状态区，用户不要这种挂法
+                // 没有游戏在跑（或这一局已过期的）就整行收起，不留一行"上次 …"的挂账
                 tv.visibility = View.GONE
             } else {
                 val hz = refreshHz(ctx)
@@ -1402,13 +1400,10 @@ object ControlPanel {
     private fun apiDetailText(info: GraphicsApiInfo): String {
         val status = when (info.status) {
             ApiDetectionStatus.SESSION_CONFIRMED -> "本会话已确认"
-            ApiDetectionStatus.LAST_KNOWN -> "上次会话"
-            ApiDetectionStatus.SUPPORT_ONLY -> "仅设备支持"
             ApiDetectionStatus.UNDETERMINED -> "认不出来"
         }
         val source = when (info.source) {
             ApiDetectionSource.RUNTIME_PROCESS_MAPS -> "进程映射"
-            ApiDetectionSource.LOCAL_HISTORY -> "本地历史"
             ApiDetectionSource.NONE -> "无来源"
         }
         val confidence = when (info.confidence) {

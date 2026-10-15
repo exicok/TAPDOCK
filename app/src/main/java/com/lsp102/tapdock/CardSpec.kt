@@ -46,16 +46,6 @@ enum class CardSpec(
         }
         return false
     }
-
-    companion object {
-        private val byId = values().associateBy { it.id }
-
-        /** 按 App 里存的顺序排；顺序表没列到的（比如新版本新加的卡片）按默认顺序排在后面 */
-        fun ordered(order: List<String>): List<CardSpec> {
-            val rest = LinkedHashMap(byId)
-            return order.mapNotNull { rest.remove(it) } + rest.values
-        }
-    }
 }
 
 /** 排序界面上一张卡片格子的显示数据 */

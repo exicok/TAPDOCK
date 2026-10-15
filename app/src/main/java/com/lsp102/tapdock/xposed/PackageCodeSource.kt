@@ -48,10 +48,4 @@ object PackageCodeSource {
             XposedBridge.log("[TapDock] pkg dismiss writeback failed: $t")
         }
     }
-
-    /** 开关关掉时一起丢掉缓存，别留一个不会再亮的图标 */
-    fun clear() {
-        pushed.set("")
-        dismissedId = -1L
-    }
 }
