@@ -8,9 +8,18 @@ object CardIds {
 
     const val SYS_PREFIX = "sys:"
 
+    /** 删除标记前缀：card_order 里 `!bt` 表示原生蓝牙卡片已被删除，面板不再放出 */
+    const val HIDDEN_PREFIX = "!"
+
     fun sys(spec: String) = SYS_PREFIX + spec
 
     fun isSys(id: String) = id.startsWith(SYS_PREFIX)
+
+    fun isHidden(id: String) = id.startsWith(HIDDEN_PREFIX)
+
+    fun hiddenOf(id: String) = id.removePrefix(HIDDEN_PREFIX)
+
+    fun hidden(id: String) = HIDDEN_PREFIX + id
 
     /** sys: 后面那段：内置磁贴是短名（dnd / rotation…），第三方是 com.foo/.BarTile */
     fun specOf(id: String) = id.removePrefix(SYS_PREFIX)

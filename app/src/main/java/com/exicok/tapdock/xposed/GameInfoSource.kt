@@ -3,8 +3,10 @@ package com.lsp102.tapdock.xposed
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import de.robv.android.xposed.XposedBridge
 
 /**
@@ -65,16 +67,45 @@ object GameInfoSource {
     var background = false
         private set
 
+    /**
+     * 前台此刻是不是游戏（不要求元数据新鲜）。
+     * 悬浮游戏图标只认这个：它一局可能连跑几小时，root 采集缓不缓存都得先把图标挂上。
+     */
+    @Volatile
+    var gameForeground = false
+        private set
+
+    /** 当前前台游戏包名；侧边栏用它取应用名 / 图标（还没识别到就是 null） */
+    @Volatile
+    var foregroundPackage: String? = null
+        private set
+
     /** Dock 的 tick 和面板的每秒 tick 都调；内部整体按节流问 */
     fun refresh(context: Context) {
         val now = System.currentTimeMillis()
+        // 前台判定每拍都做：UsageStats 查询很便宜，悬浮图标要跟着进出游戏尽快亮/灭
+        val pkg = updateForeground(context)
         if (now - askedAt < if (isOpen) ASK_MS else IDLE_MS) return
         askedAt = now
-        val pkg = foregroundGame(context)
         val info = peek(context)
         background = pkg == null && info != null
         dockLive = pkg != null && info != null
         if (pkg != null) com.lsp102.tapdock.HookSync.queryGameInfo(context, pkg)
+    }
+
+    /**
+     * 悬浮把手的 1 秒安全拍：只刷新前台判定，不碰 root 采集。
+     * 切到别的应用时尽快把 gameForeground 置否，边缘返回手势才能及时恢复。
+     */
+    fun checkForeground(context: Context) {
+        updateForeground(context)
+    }
+
+    private fun updateForeground(context: Context): String? {
+        val pkg = foregroundGame(context)
+        gameForeground = pkg != null
+        foregroundPackage = pkg
+        return pkg
     }
 
     /**
@@ -130,16 +161,30 @@ object GameInfoSource {
      */
     private fun isGame(context: Context, pkg: String): Boolean {
         gameCache[pkg]?.let { return it }
-        val ai = try {
-            context.packageManager.getApplicationInfo(pkg, 0)
-        } catch (_: Throwable) {
-            null
+        // 桌面本身常常锁横屏（这台机器的 droiddeck 桌面就是），别把它当成游戏，
+        // 否则悬浮条会在桌面上也一直挂着
+        val verdict = !isHome(context, pkg) && run {
+            val ai = try {
+                context.packageManager.getApplicationInfo(pkg, 0)
+            } catch (_: Throwable) {
+                null
+            }
+            val landscape = launchOrientation(context, pkg) in LANDSCAPE_LOCKS
+            ai != null && (ai.category == ApplicationInfo.CATEGORY_GAME || landscape)
         }
-        val landscape = launchOrientation(context, pkg) in LANDSCAPE_LOCKS
-        val verdict = ai != null &&
-            (ai.category == ApplicationInfo.CATEGORY_GAME || landscape)
         gameCache[pkg] = verdict
         return verdict
+    }
+
+    /** 当前默认桌面：它打出的 ACTIVITY_RESUMED 就是"回桌面"，不是"进游戏" */
+    private fun isHome(context: Context, pkg: String): Boolean = try {
+        val home = context.packageManager.resolveActivity(
+            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+            PackageManager.MATCH_DEFAULT_ONLY,
+        )?.activityInfo?.packageName
+        home == pkg
+    } catch (_: Throwable) {
+        false
     }
 
     /** 锁横屏的四种声明；不含允许竖屏的 FULL_* 和 PORTRAIT_* */

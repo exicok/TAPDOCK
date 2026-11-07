@@ -14,9 +14,27 @@
     <string name="align_left">靠左</string>
     <string name="align_right">靠右</string>
 
-    <string name="nav_dock">Dock</string>
-    <string name="nav_panel">控制中心</string>
+    <string name="nav_center">控制中心</string>
+    <string name="nav_systemui">SystemUI</string>
+    <string name="nav_game">游戏</string>
     <string name="nav_about">关于</string>
+
+    <string name="sec_game">游戏</string>
+    <string name="opt_game_bubble">游戏中显示悬浮侧边栏</string>
+    <string name="sub_game_bubble">前台运行游戏时在屏幕左上角贴一条竖向把手：默认只露出右缘，向右滑动打开侧边栏，里面是游戏信息与常用快捷开关；点空白处收起</string>
+    <string name="opt_game_bubble_size">悬浮条大小</string>
+    <string name="sub_game_bubble_size">默认贴在屏幕左上角，只有右缘一条露在屏幕里；右滑或点一下打开侧边栏</string>
+    <string name="bubble_size_small">小</string>
+    <string name="bubble_size_standard">标准</string>
+    <string name="bubble_size_large">大</string>
+    <string name="game_hint">游戏判定依据：清单里声明为游戏，或启动 Activity 锁横屏（桌面除外）。悬浮条存在期间只会临时关闭左边缘的侧滑返回，切到其他应用或离开游戏后立即恢复。</string>
+
+    <string name="sec_systemui">SystemUI</string>
+    <string name="opt_shade_blur">通知栏模糊度</string>
+    <string name="sub_shade_blur" formatted="false">下拉通知栏背景的模糊强度：100% 为系统上限，0% 关闭</string>
+    <string name="blur_percent_fmt">%1$d%%</string>
+    <string name="opt_shade_bg">通知栏背景色</string>
+    <string name="sub_shade_bg">关闭后下拉通知栏不再铺系统底色，只保留模糊与壁纸</string>
 
     <string name="sec_about">关于</string>
     <string name="opt_libraries">开源引用库</string>
@@ -83,7 +101,8 @@
     <string name="opt_album_thumb">播放音乐时在进度条左侧显示封面小图</string>
     <string name="opt_cpu_chart">状态区资源占用图（CPU 全核心 / GPU / 内存 / zram）</string>
     <string name="card_order_title">控制中心卡片</string>
-    <string name="card_order_hint">长按卡片拖动换位；下方目录勾选后作为代理卡片加入面板</string>
+    <string name="card_order_hint">长按卡片拖动换位，点 × 删除；下方目录勾选后作为代理卡片加入面板</string>
+    <string name="card_delete">删除卡片</string>
     <string name="card_order_reset">恢复默认</string>
     <string name="card_order_sys_refresh">载入系统目录</string>
     <string name="card_order_section_cards">面板中的卡片</string>

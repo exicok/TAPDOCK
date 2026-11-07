@@ -10,8 +10,9 @@ class MainHook : IXposedHookLoadPackage {
         when (lpparam.packageName) {
             // 屏幕顶部的系统栏：把 Dock 注入右上角
             "com.android.systemui" -> {
-                FpsMonitor.hook()
                 StatusBarHook.hook(lpparam.classLoader)
+                ShadeBlurHook.hook(lpparam.classLoader)
+                ShadeBackgroundHook.hook(lpparam.classLoader)
                 FreeformTopHook.hook(lpparam.classLoader)
                 FreeformCaptionHook.hook(lpparam.classLoader)
             }
@@ -20,7 +21,6 @@ class MainHook : IXposedHookLoadPackage {
             "com.android.launcher3",
             "com.google.android.apps.nexuslauncher",
             -> {
-                FpsMonitor.hook()
                 TaskbarHook.hook(lpparam.classLoader)
                 RecentsLayoutHook.hook(lpparam.classLoader)
             }

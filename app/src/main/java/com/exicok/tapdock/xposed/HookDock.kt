@@ -5,6 +5,7 @@ import android.animation.AnimatorListenerAdapter
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.app.Notification
+import android.app.PendingIntent
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothProfile
@@ -32,6 +33,8 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.telecom.TelecomManager
+import android.telephony.TelephonyManager
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -94,12 +97,29 @@ object HookDock {
     const val EXTRA_NCARD = "ncard"
     const val EXTRA_MAXW = "maxw"
     const val EXTRA_API_BADGE = "api_badge"
+    const val EXTRA_SHADE_BLUR = "shade_blur_pct"
+    const val EXTRA_SHADE_BG = "shade_bg"
+    const val EXTRA_GAME_BUBBLE = "game_bubble"
+    const val EXTRA_GAME_BUBBLE_DP = "game_bubble_dp"
     const val ALIGN_LEFT = "left"
     const val ALIGN_RIGHT = "right"
 
     const val MODULE_PKG = "com.lsp102.tapdock"
     private const val TAG_ROOT = "tapdock_dock_root"
+    private const val TAG_CALL = "tapdock_call_bar"
+
+    /** 记录横条在屏幕原点的 translationX，滑出时按它起算 */
+    private const val CALL_BASE_X_TAG = 0x7f0f0010
     private const val PREFS_FILE = "dock_prefs"
+
+    /** 来电横条：铺满状态栏的黑底 + 左挂断 / 右接听 */
+    private const val CALL_BG = 0xE6000000.toInt()
+    private const val CALL_ANSWER_COLOR = 0xFF2E7D32.toInt()
+    private const val CALL_DECLINE_COLOR = 0xFFC62828.toInt()
+
+    /** Notification.Action 的语义值：ANSWER / DECLINE 是 @SystemApi，公开 SDK 里没有常量 */
+    private const val SEMANTIC_ANSWER = 4
+    private const val SEMANTIC_DECLINE = 5
 
     // 基础外观
     private const val BG_ALPHA_PERCENT = 80
@@ -263,10 +283,42 @@ object HookDock {
     /** 游戏 tile 换成图形 API 图标的开关（同上，走三级通道） */
     private val overrideApiBadge = AtomicReference<Boolean?>(null)
 
+    /** 下拉通知栏模糊度百分比（同上，走三级通道） */
+    private val overrideShadeBlur = AtomicReference<Int?>(null)
+
+    /** 下拉通知栏是否铺系统背景色（同上，走三级通道） */
+    private val overrideShadeBg = AtomicReference<Boolean?>(null)
+
+    /** 游戏中叠加的悬浮图标开关与直径（同上，走三级通道） */
+    private val overrideGameBubble = AtomicReference<Boolean?>(null)
+    private val overrideGameBubbleDp = AtomicReference<Int?>(null)
+
     /** 上一次画在游戏 tile 上的 API 结论（包名 + 类型），换结论才 setImageDrawable */
     private var lastGameApi = ""
     private var lastPercent: Int? = null
     private var lastStates: BooleanArray? = null
+
+    /** 来电横条状态：非空表示正在响铃，Dock 铺满状态栏 */
+    private var callKey = ""
+    private var callAnswer: PendingIntent? = null
+    private var callDecline: PendingIntent? = null
+
+    /** 通知里没有接听/挂断动作时改走 TelecomManager，需要靠通话状态兜底退出 */
+    private var callViaTelecom = false
+
+    /** 横条滑入/滑出动画与退出中标记，避免同一轮退出被重复触发 */
+    private var callBarAnim: ValueAnimator? = null
+    private var callExiting = false
+
+    /** 来电横条展开前，状态栏里被临时藏起来的兄弟视图（退出时按原可见性还原） */
+    private val callHiddenSiblings = HashMap<View, Int>()
+
+    /** 来电横条期间被抹平的状态栏容器内边距（退出时还原），见 [flattenParentInsets] */
+    private val callParentPadding = HashMap<View, IntArray>()
+
+    /** 来电动作兜底匹配词：语义值读不到时按标题找 */
+    private val callAnswerWords = arrayOf("接听", "应答", "answer", "accept")
+    private val callDeclineWords = arrayOf("挂断", "拒绝", "decline", "reject", "hang")
 
     /** 上一次是否因为播放封面而让位了状态图标，切换它要重排整条 Dock */
     private var lastArtShown: Boolean? = null
@@ -342,6 +394,9 @@ object HookDock {
         var thumbToken: String? = null
 
         var anim: ValueAnimator? = null
+
+        /** 来电横条展开前的内边距 [l, t, r, b]；非空表示正处在横条模式 */
+        var callPadding: IntArray? = null
     }
 
     private fun loadPrefs(): XSharedPreferences? {
@@ -659,6 +714,56 @@ object HookDock {
         fill.setCat(scaledCat(context, dp(context, if (compact) 20 else 26)))
         root.addView(track)
 
+        // 来电横条：左半红「挂断」、右半绿「接听」，两半各自铺满整个状态栏，左右不留白
+        val callBar = LinearLayout(context).apply {
+            tag = TAG_CALL
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+        }
+        val decline = TextView(context).apply {
+            text = "挂断"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 15f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(CALL_DECLINE_COLOR)
+                cornerRadius = 0f
+            }
+            isClickable = true
+            setOnClickListener { declineCall() }
+        }
+        val answer = TextView(context).apply {
+            text = "接听"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 15f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(CALL_ANSWER_COLOR)
+                cornerRadius = 0f
+            }
+            isClickable = true
+            setOnClickListener { answerCall() }
+        }
+        callBar.addView(
+            decline,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
+        )
+        callBar.addView(
+            answer,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
+        )
+        root.addView(
+            callBar,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+
         root.visibility = if (enabled()) View.VISIBLE else View.GONE
 
         // 全圆角（胶囊形）：布局完成后把圆角设为高度的一半
@@ -670,9 +775,10 @@ object HookDock {
             }
         }
 
-        // 点击 Dock：打开 / 关闭控制中心（面板贴屏幕顶部居中，见 ControlPanel）
+        // 点击 Dock：打开 / 关闭控制中心（面板贴屏幕顶部居中，见 ControlPanel）。
+        // 来电横条期间整条 Dock 是接听/挂断按钮区，空白处不再触发展开面板。
         root.isClickable = true
-        root.setOnClickListener { ControlPanel.toggle(root) }
+        root.setOnClickListener { if (callKey.isEmpty()) ControlPanel.toggle(root) }
         return DockViews(
             root, track, fill, icons, priv, art, clock, badge, otp, back, bg, root.minimumWidth,
             padH * 2 + iconSize
@@ -804,7 +910,29 @@ object HookDock {
                     lastStates = null
                     main.post { applyContent() }
                 }
-                main.post { rebuildAll() }
+                if (intent.hasExtra(EXTRA_SHADE_BLUR)) {
+                    overrideShadeBlur.set(intent.getIntExtra(EXTRA_SHADE_BLUR, 100))
+                    ShadeBlurHook.refresh()
+                }
+                if (intent.hasExtra(EXTRA_SHADE_BG)) {
+                    overrideShadeBg.set(intent.getBooleanExtra(EXTRA_SHADE_BG, true))
+                    ShadeBackgroundHook.refresh()
+                }
+                if (intent.hasExtra(EXTRA_GAME_BUBBLE)) {
+                    overrideGameBubble.set(intent.getBooleanExtra(EXTRA_GAME_BUBBLE, true))
+                }
+                if (intent.hasExtra(EXTRA_GAME_BUBBLE_DP)) {
+                    overrideGameBubbleDp.set(
+                        intent.getIntExtra(
+                            EXTRA_GAME_BUBBLE_DP,
+                            com.lsp102.tapdock.DockPrefs.DEFAULT_GAME_BUBBLE_DP
+                        )
+                    )
+                }
+                main.post {
+                    rebuildAll()
+                    appContextRef?.get()?.let { syncGameBubble(it) }
+                }
             }
         }
         val filter = IntentFilter(ACTION_RELOAD).apply {
@@ -968,7 +1096,10 @@ object HookDock {
             try {
                 fetchRemoteState()
                 // 游戏元数据的采集不能只挂在面板上：面板收着的时候 Dock 那颗游戏图标也要亮
-                appContextRef?.get()?.let { GameInfoSource.refresh(it) }
+                appContextRef?.get()?.let {
+                    GameInfoSource.refresh(it)
+                    syncGameBubble(it)
+                }
                 applyContent()
                 // 引擎侧顺便刷新面板在用的系统磁贴（宿主侧这行是空操作）
                 SystemTiles.pushStates(cardOrder())
@@ -1017,6 +1148,20 @@ object HookDock {
                         if (abi >= 0) overrideApiBadge.set(c.getInt(abi) == 1)
                         val mwi = c.getColumnIndex("maxw")
                         if (mwi >= 0) overrideMaxW.set(c.getInt(mwi))
+                        val sbi = c.getColumnIndex("shadeblur")
+                        if (sbi >= 0) {
+                            overrideShadeBlur.set(c.getInt(sbi))
+                            ShadeBlurHook.refresh()
+                        }
+                        val sgi = c.getColumnIndex("shadebg")
+                        if (sgi >= 0) {
+                            overrideShadeBg.set(c.getInt(sgi) == 1)
+                            ShadeBackgroundHook.refresh()
+                        }
+                        val gbi = c.getColumnIndex("gbubble")
+                        if (gbi >= 0) overrideGameBubble.set(c.getInt(gbi) == 1)
+                        val gdi = c.getColumnIndex("gbubbledp")
+                        if (gdi >= 0) overrideGameBubbleDp.set(c.getInt(gdi))
                         if (ai >= 0) overrideAlignRight.set(c.getString(ai) != ALIGN_LEFT)
                         if (ci >= 0) overrideColor.set(c.getInt(ci))
                         if (oi >= 0) {
@@ -1057,6 +1202,26 @@ object HookDock {
         // 视图层兜底：周期性把系统状态栏里被接管的图标视图隐藏掉
         sweepHiddenIcons(snapshot[0].root.rootView)
 
+        // 走 Telecom 兜底的来电：通知不一定随通话状态更新，这里每拍看一眼通话状态
+        if (callKey.isNotEmpty() && callViaTelecom &&
+            callStateOf(context) != TelephonyManager.CALL_STATE_RINGING
+        ) {
+            endCallMode()
+            return
+        }
+
+        // 来电横条：状态栏那条 Dock 铺满，其他内容让位；桌面任务栏保持原样
+        if (callKey.isNotEmpty()) {
+            var any = false
+            for (b in snapshot) {
+                if (isStatusBarBinding(b)) {
+                    applyCallDock(b, true)
+                    any = true
+                }
+            }
+            if (any) return
+        }
+
         // 只在展开/收起那一次切换上补间体积
         val transition = lastPanelOpen != panelOpen
         lastPanelOpen = panelOpen
@@ -1081,6 +1246,7 @@ object HookDock {
             return
         }
         for (b in snapshot) {
+            if (b.callPadding != null) applyCallDock(b, false)
             b.root.minimumWidth = b.minWidth
             clampDockWidth(b, context)
             // 返回图标只在控制中心展开时存在，这里每帧定死，不靠切换那一帧
@@ -1219,6 +1385,370 @@ object HookDock {
                 val lp = b.fill.layoutParams
                 lp.width = ((trackW * trackPercent) / 100).coerceAtLeast(dp(b.fill.context, 3))
                 b.fill.layoutParams = lp
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ 来电横条
+
+    /** 只有状态栏里的 Dock 进来电横条模式；桌面任务栏维持原样 */
+    private fun isStatusBarBinding(b: Binding): Boolean =
+        b.root.context.packageName == "com.android.systemui"
+
+    /**
+     * 来电通知：带 ANSWER 动作、或系统通话状态确实在响铃，都算来电并铺横条
+     * （左挂断 / 右接听）。同一条通知后来既没有 ANSWER 也不再响铃，就退出。
+     */
+    private fun handleCallNotification(ctx: Context, sbn: StatusBarNotification): Boolean {
+        val n = sbn.notification ?: return false
+        if (n.category != Notification.CATEGORY_CALL) return false
+        val ringing = callStateOf(ctx) == TelephonyManager.CALL_STATE_RINGING
+        val answer = callAction(n, SEMANTIC_ANSWER, callAnswerWords)
+        val key = keyOf(sbn)
+        // 有接听动作，或者系统通话状态确实在响铃，都算来电
+        if (answer != null || ringing) {
+            if (callKey.isEmpty()) {
+                XposedBridge.log(
+                    "[TapDock] incoming call: ${sbn.packageName} " +
+                        "ring=$ringing actions=${n.actions?.size ?: 0} answer=${answer != null}"
+                )
+            }
+            callKey = key
+            callAnswer = answer?.actionIntent
+            callDecline = callAction(n, SEMANTIC_DECLINE, callDeclineWords)?.actionIntent
+            callViaTelecom = answer == null
+            // 面板正开着会挡住状态栏，先收掉再铺横条
+            if (panelOpenNow()) ControlPanel.dismiss()
+            applyContent()
+            NotificationCard.showCall(ctx, sbn)
+            return true
+        }
+        if (callKey == key) {
+            endCallMode()
+            NotificationCard.onRemoved(key)
+            return true
+        }
+        return false
+    }
+
+    /** 当前通话状态；SystemUI 有 READ_PHONE_STATE，读不到就按空闲处理 */
+    private fun callStateOf(ctx: Context): Int = try {
+        val tm = ctx.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+        tm?.callState ?: TelephonyManager.CALL_STATE_IDLE
+    } catch (_: Throwable) {
+        TelephonyManager.CALL_STATE_IDLE
+    }
+
+    private fun callAction(
+        n: Notification,
+        semantic: Int,
+        words: Array<String>,
+    ): Notification.Action? {
+        val actions = n.actions ?: return null
+        actions.firstOrNull { it.getSemanticAction() == semantic }?.let { return it }
+        return actions.firstOrNull { a ->
+            val t = a.title?.toString()?.lowercase(Locale.getDefault()) ?: return@firstOrNull false
+            words.any { t.contains(it) }
+        }
+    }
+
+    private fun answerCall() {
+        callAnswer?.let { sendCallIntent(it, "answer"); return }
+        try {
+            val telecom = appContextRef?.get()
+                ?.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+            telecom?.acceptRingingCall()
+            XposedBridge.log("[TapDock] call answer via telecom")
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] call answer failed: $t")
+        }
+    }
+
+    private fun declineCall() {
+        callDecline?.let { sendCallIntent(it, "decline"); return }
+        try {
+            val telecom = appContextRef?.get()
+                ?.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+            telecom?.endCall()
+            XposedBridge.log("[TapDock] call decline via telecom")
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] call decline failed: $t")
+        }
+    }
+
+    private fun sendCallIntent(pi: PendingIntent, tag: String) {
+        try {
+            pi.send()
+            XposedBridge.log("[TapDock] call $tag sent")
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] call $tag failed: $t")
+        }
+    }
+
+    private fun endCallMode() {
+        if (callKey.isEmpty() || callExiting) return
+        val snapshot = synchronized(bindings) { bindings.toList() }
+        val bars = mutableListOf<View>()
+        for (b in snapshot) {
+            if (!isStatusBarBinding(b)) continue
+            val bar = findCallBar(b) ?: continue
+            if (bar.parent !== b.root && bar.visibility == View.VISIBLE) bars.add(bar)
+        }
+        if (bars.isEmpty()) {
+            finishCallMode(snapshot)
+            return
+        }
+        // 退出也走滑动：整条红绿横条向右滑出屏幕，滑完再还原 Dock
+        callExiting = true
+        callBarAnim?.cancel()
+        val anim = ValueAnimator.ofFloat(0f, 1f)
+        anim.duration = 260L
+        anim.interpolator = PathInterpolator(0.4f, 0f, 1f, 1f)
+        anim.addUpdateListener {
+            val f = it.animatedFraction
+            for (bar in bars) {
+                val from = bar.getTag(CALL_BASE_X_TAG) as? Float ?: 0f
+                val to = bar.resources.displayMetrics.widthPixels.toFloat()
+                bar.translationX = from + (to - from) * f
+            }
+        }
+        anim.addListener(object : AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: Animator) {
+                if (callExiting) finishCallMode(snapshot)
+            }
+        })
+        callBarAnim = anim
+        anim.start()
+    }
+
+    private fun finishCallMode(snapshot: List<Binding>) {
+        callExiting = false
+        callBarAnim = null
+        callKey = ""
+        callAnswer = null
+        callDecline = null
+        callViaTelecom = false
+        for (b in snapshot) {
+            if (isStatusBarBinding(b)) applyCallDock(b, false)
+        }
+        restoreDockSiblings()
+        applyContent()
+    }
+
+    private fun findCallBar(b: Binding): View? {
+        val root = b.root
+        return root.findViewWithTag<View>(TAG_CALL)
+            ?: statusBarRoot(b)?.findViewWithTag<View>(TAG_CALL)
+            ?: (root.rootView as? ViewGroup)?.findViewWithTag<View>(TAG_CALL)
+    }
+
+    /** 进入/退出来电横条：整条 Dock 铺满状态栏，正常内容全部让位 */
+    private fun applyCallDock(b: Binding, active: Boolean) {
+        val root = b.root
+        val statusBar = statusBarRoot(b)
+        // 横条被挪到状态栏窗口根布局后就不再是 Dock 的子视图，退出时得从那边找回来
+        val bar = root.findViewWithTag<View>(TAG_CALL)
+            ?: statusBar?.findViewWithTag<View>(TAG_CALL)
+            ?: (root.rootView as? ViewGroup)?.findViewWithTag<View>(TAG_CALL)
+        if (active) {
+            if (b.callPadding == null) {
+                b.callPadding = intArrayOf(
+                    root.paddingLeft, root.paddingTop, root.paddingRight, root.paddingBottom
+                )
+            }
+            root.setPadding(0, 0, 0, 0)
+            root.minimumWidth = 0
+            b.back.visibility = View.GONE
+            b.badge.visibility = View.GONE
+            b.otp.visibility = View.GONE
+            b.art.visibility = View.GONE
+            b.track.visibility = View.GONE
+            b.clock.visibility = View.GONE
+            b.icons.forEach { it.visibility = View.GONE }
+            b.priv.forEach { it.visibility = View.GONE }
+            root.findViewWithTag<TextView>(TAG_HS)?.visibility = View.GONE
+            b.pill.setColor(CALL_BG)
+            b.pill.cornerRadius = 0f
+            if (bar != null && statusBar != null) {
+                // 挂到状态栏窗口根布局：PhoneStatusBarView 自己可能被内缩，只有窗口根才是整屏宽
+                val host = (root.rootView as? ViewGroup) ?: statusBar
+                val barH = statusBar.height.takeIf { it > 0 } ?: statusBarHeightPx(root.context)
+                if (bar.parent !== host) {
+                    (bar.parent as? ViewGroup)?.removeView(bar)
+                    val w = root.resources.displayMetrics.widthPixels
+                    // 先透明隐藏，等贴到屏幕原点后从右边滑进来，避免整条横条闪一帧
+                    bar.alpha = 0f
+                    var added = false
+                    try {
+                        host.addView(
+                            bar,
+                            FrameLayout.LayoutParams(
+                                w,
+                                barH,
+                                Gravity.TOP or Gravity.START,
+                            ),
+                        )
+                        added = true
+                    } catch (t: Throwable) {
+                        // 极少数 ROM 的窗口根不是 FrameLayout，退回状态栏视图里挂
+                        XposedBridge.log("[TapDock] call bar host add failed: $t")
+                        try {
+                            statusBar.addView(
+                                bar,
+                                FrameLayout.LayoutParams(
+                                    w,
+                                    barH,
+                                    Gravity.TOP or Gravity.START,
+                                ),
+                            )
+                            added = true
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    if (added) {
+                        bar.post {
+                            val parent = bar.parent as? ViewGroup
+                            if (parent != null) {
+                                // 先把横条校正到屏幕原点，再整体挪到屏幕右外侧开始滑入
+                                bar.translationX = 0f
+                                val loc = IntArray(2)
+                                bar.getLocationOnScreen(loc)
+                                val baseX = -loc[0].toFloat()
+                                bar.translationY -= loc[1].toFloat()
+                                bar.setTag(CALL_BASE_X_TAG, baseX)
+                                bar.translationX = baseX + w
+                                bar.alpha = 1f
+                                callBarAnim?.cancel()
+                                val anim = ValueAnimator.ofFloat(baseX + w, baseX)
+                                anim.duration = 300L
+                                anim.interpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
+                                anim.addUpdateListener {
+                                    bar.translationX = it.animatedValue as Float
+                                }
+                                callBarAnim = anim
+                                anim.start()
+                                XposedBridge.log(
+                                    "[TapDock] call bar slide-in from right: " +
+                                        "host=${parent.javaClass.simpleName} w=${parent.width} " +
+                                        "barW=${bar.width} baseX=$baseX"
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    bar.alpha = 1f
+                }
+                bar.visibility = View.VISIBLE
+                root.visibility = View.GONE
+            } else {
+                // 兜底：找不到状态栏根布局时还在 Dock 里铺，靠藏兄弟 + 抹平内边距
+                bar?.visibility = View.VISIBLE
+                setDockWidth(b, ViewGroup.LayoutParams.MATCH_PARENT)
+                hideDockSiblings(b)
+                flattenParentInsets(b)
+            }
+        } else {
+            val host = bar?.parent as? ViewGroup
+            if (bar != null && host != null && host !== root) {
+                host.removeView(bar)
+                bar.translationX = 0f
+                bar.translationY = 0f
+                root.addView(
+                    bar,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
+            bar?.visibility = View.GONE
+            root.visibility = if (enabled()) View.VISIBLE else View.GONE
+            b.callPadding?.let {
+                root.setPadding(it[0], it[1], it[2], it[3])
+                b.callPadding = null
+            }
+            root.minimumWidth = b.minWidth
+            b.pill.setColor(dockBackgroundColor())
+            b.pill.cornerRadius = (root.height.coerceAtMost(root.width)) / 2f
+            setDockWidth(b, ViewGroup.LayoutParams.WRAP_CONTENT)
+            restoreParentInsets(b)
+        }
+    }
+
+    /** 系统状态栏高度（px），拿不到时退回 24dp */
+    private fun statusBarHeightPx(ctx: Context): Int {
+        val id = ctx.resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (id != 0) ctx.resources.getDimensionPixelSize(id) else dp(ctx, 24)
+    }
+
+    /** 从 Dock 往上找状态栏根布局（PhoneStatusBarView）：整条状态栏的宽度由它决定 */
+    private fun statusBarRoot(b: Binding): ViewGroup? {
+        var v: View? = b.parentRef.get()
+        while (v != null) {
+            if (v.javaClass.name.endsWith("PhoneStatusBarView")) return v as? ViewGroup
+            v = v.parent as? View
+        }
+        return null
+    }
+
+    private fun setDockWidth(b: Binding, width: Int) {
+        val lp = b.root.layoutParams ?: return
+        if (lp.width == width) return
+        lp.width = width
+        b.root.layoutParams = lp
+    }
+
+    /** 状态栏里把 Dock 的兄弟视图临时藏起来，横条才能真正铺满整条 */
+    private fun hideDockSiblings(b: Binding) {
+        if (b.isFrame) return
+        val parent = b.parentRef.get() ?: return
+        synchronized(callHiddenSiblings) {
+            for (i in 0 until parent.childCount) {
+                val child = parent.getChildAt(i)
+                if (child === b.root) continue
+                if (!callHiddenSiblings.containsKey(child)) {
+                    callHiddenSiblings[child] = child.visibility
+                }
+                child.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun restoreDockSiblings() {
+        synchronized(callHiddenSiblings) {
+            for ((v, vis) in callHiddenSiblings) v.visibility = vis
+            callHiddenSiblings.clear()
+        }
+    }
+
+    /**
+     * 铺满的关键：状态栏容器（status_bar_contents）自己带左右内边距，
+     * 只把 Dock 设成 MATCH_PARENT 还差这两截。这里先记下原内边距再抹平，退出时还原。
+     */
+    private fun flattenParentInsets(b: Binding) {
+        if (b.isFrame) return
+        val parent = b.parentRef.get() ?: return
+        synchronized(callParentPadding) {
+            if (!callParentPadding.containsKey(parent)) {
+                callParentPadding[parent] = intArrayOf(
+                    parent.paddingLeft, parent.paddingTop,
+                    parent.paddingRight, parent.paddingBottom,
+                )
+            }
+            if (parent.paddingLeft != 0 || parent.paddingRight != 0 ||
+                parent.paddingTop != 0 || parent.paddingBottom != 0
+            ) {
+                parent.setPadding(0, 0, 0, 0)
+            }
+        }
+    }
+
+    private fun restoreParentInsets(b: Binding) {
+        if (b.isFrame) return
+        val parent = b.parentRef.get() ?: return
+        synchronized(callParentPadding) {
+            callParentPadding.remove(parent)?.let {
+                parent.setPadding(it[0], it[1], it[2], it[3])
             }
         }
     }
@@ -1440,6 +1970,14 @@ object HookDock {
     internal fun cpuChart(): Boolean =
         overrideCpu.get() ?: (loadPrefs()?.getBoolean("cpu_chart", false) ?: false)
 
+    /** 下拉通知栏模糊度：相对系统上限的百分比，0 = 关闭，100 = 系统原样 */
+    internal fun shadeBlurPercent(): Int = (overrideShadeBlur.get()
+        ?: (loadPrefs()?.getInt("shade_blur_percent", 100) ?: 100)).coerceIn(0, 100)
+
+    /** 下拉通知栏是否铺系统背景色（默认开） */
+    internal fun shadeBackground(): Boolean =
+        overrideShadeBg.get() ?: (loadPrefs()?.getBoolean("shade_background", true) ?: true)
+
     /** Dock 左侧的通知数徽标（App 里的开关，默认开） */
     private fun notifBadge(): Boolean =
         overrideBadge.get() ?: (loadPrefs()?.getBoolean("notif_badge", true) ?: true)
@@ -1480,6 +2018,27 @@ object HookDock {
     /** 游戏 tile 换成图形 API 图标（App 里的开关，默认开） */
     internal fun apiBadge(): Boolean =
         overrideApiBadge.get() ?: (loadPrefs()?.getBoolean("api_badge", true) ?: true)
+
+    /** 前台游戏时叠加悬浮图标（App 里的开关，默认开） */
+    private fun gameBubbleOn(): Boolean =
+        overrideGameBubble.get() ?: (loadPrefs()?.getBoolean("game_bubble", true) ?: true)
+
+    /** 悬浮游戏图标直径（dp，App 里的档位） */
+    private fun gameBubbleDp(): Int = (overrideGameBubbleDp.get()
+        ?: (loadPrefs()?.getInt("game_bubble_dp", com.lsp102.tapdock.DockPrefs.DEFAULT_GAME_BUBBLE_DP)
+            ?: com.lsp102.tapdock.DockPrefs.DEFAULT_GAME_BUBBLE_DP)).coerceIn(32, 72)
+
+    /**
+     * 悬浮游戏图标只在 SystemUI 进程里挂：桌面进程的 ticker 也会跑前台游戏判定，
+     * 跟着挂就是第二颗图标压在同一处。进出游戏、开关、尺寸都由这一拍决定。
+     */
+    private fun syncGameBubble(context: Context) {
+        GameBubble.sync(
+            context.applicationContext,
+            gameBubbleOn() && GameInfoSource.gameForeground,
+            gameBubbleDp(),
+        )
+    }
 
     /**
      * 游戏 tile 这一格画哪张图。
@@ -1575,9 +2134,12 @@ object HookDock {
                     handleDownloadNotification(sbn)
                     // 横幅接管：原生横幅已经被整批关掉，够格弹的那几条改画成 Dock 下方的卡片。
                     // 双参重载会带 RankingMap（系统算好的重要度），单参调用时 args[1] 取不到就是 null
-                    if (!isGroupSummary(sbn) && notifCard()) {
+                    val ctx = appContextRef?.get()
+                    // 来电优先：横条 + 下方的来电信息卡片，普通横幅在响铃期间让位
+                    val isCall = ctx != null && handleCallNotification(ctx, sbn)
+                    if (!isCall && !isGroupSummary(sbn) && notifCard()) {
                         val ranking = param.args?.getOrNull(1) as? NotificationListenerService.RankingMap
-                        appContextRef?.get()?.let { NotificationCard.onPosted(it, sbn, ranking) }
+                        ctx?.let { NotificationCard.onPosted(it, sbn, ranking) }
                     }
                     // 验证码走同一条管线：不读短信数据库，只看已经弹出来的通知
                     val before = OtpSource.peek()?.text
@@ -1591,12 +2153,14 @@ object HookDock {
             XposedBridge.hookAllMethods(cls, "onNotificationRemoved", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: XC_MethodHook.MethodHookParam) {
                     val sbn = param.args?.firstOrNull() as? StatusBarNotification ?: return
-                    synchronized(activeNotifs) { activeNotifs.remove(keyOf(sbn)) }
+                    val key = keyOf(sbn)
+                    if (key == callKey) endCallMode()
+                    synchronized(activeNotifs) { activeNotifs.remove(key) }
                     synchronized(downloadMap) { downloadMap.remove(sbn.packageName) }
                     // 验证码不在这里清：短信应用常常两三秒就把通知 cancel 掉，
                     // 码得在 Dock 上撑满 OtpSource.TTL_MS 那 10 秒才够抄
                     // 通知被撤掉时卡片跟着收，免得留下一张已经不存在的通知
-                    NotificationCard.onRemoved(keyOf(sbn))
+                    NotificationCard.onRemoved(key)
                     main.post {
                         lastPercent = null
                         applyContent()
@@ -1794,6 +2358,10 @@ object HookDock {
 
     /** 控制中心此刻是否展开（通知卡片用它决定要不要憋着） */
     internal fun panelOpenNow(): Boolean = panelOpen
+
+    /** 当前注入的 Dock 根视图；横竖屏重建面板时拿它当锚点 */
+    internal fun dockRootView(): View? =
+        synchronized(bindings) { bindings.firstOrNull() }?.root
 
     /** Dock 在屏幕上的矩形 [left, top, right, bottom]；还没注入或还没量出来返回 null */
     internal fun dockScreenRect(): IntArray? {

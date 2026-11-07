@@ -35,6 +35,9 @@ class CardOrderActivity : AppCompatActivity() {
 
     /** 面板里的卡片顺序（原生 id 与 `sys:<spec>` 混排），落盘到 DockPrefs.cardOrder */
     private val order = mutableListOf<String>()
+
+    /** 被用户删掉的原生卡片；以 `!id` 追加在 card_order 末尾，面板据此不再补回 */
+    private val hidden = mutableSetOf<String>()
     private var catalog: List<SysEntry> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,7 +46,9 @@ class CardOrderActivity : AppCompatActivity() {
         setContentView(R.layout.activity_card_order)
         title = getString(R.string.card_order_title)
 
-        order.addAll(prefs.cardOrder)
+        for (id in prefs.cardOrder) {
+            if (CardIds.isHidden(id)) hidden.add(CardIds.hiddenOf(id)) else order.add(id)
+        }
         buildCatalog()
 
         rv = findViewById(R.id.rv_cards)
@@ -61,6 +66,7 @@ class CardOrderActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btn_reset).setOnClickListener {
             order.clear()
+            hidden.clear()
             order.addAll(CardSpec.values().map { it.id })
             rebuildRows()
             adapter.notifyDataSetChanged()
@@ -98,14 +104,15 @@ class CardOrderActivity : AppCompatActivity() {
     )
 
     private fun save() {
-        prefs.cardOrder = order.toList()
+        // 删除标记追加在末尾：面板先按可见顺序排，再据此排除被删掉的原生卡片
+        prefs.cardOrder = order.toList() + hidden.map { CardIds.hidden(it) }
         HookSync.notify(this, prefs)
     }
 
     private fun rebuildRows() {
         rows.clear()
         rows.add(Row.Header(getString(R.string.card_order_section_cards)))
-        Cards.resolve(order, catalog).forEach { rows.add(Row.Card(it)) }
+        Cards.resolve(order, catalog, hidden).forEach { rows.add(Row.Card(it)) }
 
         var listedCards = false
         for (kind in intArrayOf(SysCatalog.KIND_STOCK, SysCatalog.KIND_CUSTOM, SysCatalog.KIND_CONTROL)) {
@@ -123,7 +130,23 @@ class CardOrderActivity : AppCompatActivity() {
     private val rows = mutableListOf<Row>()
 
     private fun toggleEntry(entry: SysEntry) {
+        hidden.remove(entry.id)
         if (!order.remove(entry.id)) order.add(entry.id)
+        rebuildRows()
+        adapter.notifyDataSetChanged()
+        save()
+    }
+
+    /**
+     * 删除一张卡片：先把"当前实际显示"的卡片落成显式顺序（默认顺序时 order 是空的），
+     * 再去掉目标；原生卡额外记 !id，面板不会按声明顺序把它补回来。
+     */
+    private fun deleteCard(id: String) {
+        val visible = Cards.resolve(order, catalog, hidden).map { it.id }
+        if (id !in visible) return
+        order.clear()
+        visible.filter { it != id }.forEach { order.add(it) }
+        if (!CardIds.isSys(id)) hidden.add(id) else hidden.remove(id)
         rebuildRows()
         adapter.notifyDataSetChanged()
         save()
@@ -209,6 +232,7 @@ class CardOrderActivity : AppCompatActivity() {
                     holder as CardHolder
                     holder.label.text = row.info.label
                     holder.icon.setImageResource(row.info.iconRes)
+                    holder.delete.setOnClickListener { deleteCard(row.info.id) }
                 }
                 is Row.Toggle -> {
                     holder as ToggleHolder
@@ -225,6 +249,7 @@ class CardOrderActivity : AppCompatActivity() {
     private class CardHolder(view: View) : RecyclerView.ViewHolder(view) {
         val icon: ImageView = view.findViewById(R.id.iv_icon)
         val label: TextView = view.findViewById(R.id.tv_label)
+        val delete: View = view.findViewById(R.id.btn_card_delete)
     }
 
     private inner class ToggleHolder(view: View) : RecyclerView.ViewHolder(view) {

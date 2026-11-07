@@ -37,6 +37,10 @@ object HookSync {
                     .putExtra(HookActions.EXTRA_NCARD, prefs.notifCard)
                     .putExtra(HookActions.EXTRA_MAXW, prefs.dockMaxDp)
                     .putExtra(HookActions.EXTRA_API_BADGE, prefs.apiBadge)
+                    .putExtra(HookActions.EXTRA_SHADE_BLUR, prefs.shadeBlurPercent)
+                    .putExtra(HookActions.EXTRA_SHADE_BG, prefs.shadeBackground)
+                    .putExtra(HookActions.EXTRA_GAME_BUBBLE, prefs.gameBubble)
+                    .putExtra(HookActions.EXTRA_GAME_BUBBLE_DP, prefs.gameBubbleDp)
                 context.sendBroadcast(intent)
             } catch (_: Exception) {
             }
@@ -225,5 +229,15 @@ object HookSync {
 
         /** 游戏 tile 换成图形 API 图标 */
         const val EXTRA_API_BADGE = "api_badge"
+
+        /** 下拉通知栏模糊度（相对系统上限的百分比） */
+        const val EXTRA_SHADE_BLUR = "shade_blur_pct"
+
+        /** 下拉通知栏是否铺系统背景色 */
+        const val EXTRA_SHADE_BG = "shade_bg"
+
+        /** 游戏中叠加的悬浮图标：开关与直径（dp） */
+        const val EXTRA_GAME_BUBBLE = "game_bubble"
+        const val EXTRA_GAME_BUBBLE_DP = "game_bubble_dp"
     }
 }

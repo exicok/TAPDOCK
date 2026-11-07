@@ -125,6 +125,16 @@ class DockPrefs(context: Context) {
         get() = sp.getBoolean(KEY_API_BADGE, true)
         set(v) = sp.edit().putBoolean(KEY_API_BADGE, v).apply()
 
+    /** 前台运行游戏时在屏幕上叠加一颗悬浮游戏图标（默认开） */
+    var gameBubble: Boolean
+        get() = sp.getBoolean(KEY_GAME_BUBBLE, true)
+        set(v) = sp.edit().putBoolean(KEY_GAME_BUBBLE, v).apply()
+
+    /** 悬浮游戏图标的直径（dp），默认 44；拖动位置由 SystemUI 侧自己记 */
+    var gameBubbleDp: Int
+        get() = sp.getInt(KEY_GAME_BUBBLE_DP, DEFAULT_GAME_BUBBLE_DP).coerceIn(32, 72)
+        set(v) = sp.edit().putInt(KEY_GAME_BUBBLE_DP, v.coerceIn(32, 72)).apply()
+
     /** SystemUI 枚举回来的系统控制块目录（spec<TAB>label<TAB>kind，逐行） */
     var sysCatalog: List<SysEntry>
         get() = SysCatalog.decode(sp.getString(KEY_SYS_CATALOG, "") ?: "")
@@ -134,6 +144,16 @@ class DockPrefs(context: Context) {
     var nyanStyle: Boolean
         get() = sp.getBoolean(KEY_NYAN_STYLE, false)
         set(v) = sp.edit().putBoolean(KEY_NYAN_STYLE, v).apply()
+
+    /** 下拉通知栏背景模糊强度：相对系统上限的百分比，0 = 关闭，100 = 系统原样 */
+    var shadeBlurPercent: Int
+        get() = sp.getInt(KEY_SHADE_BLUR, 100).coerceIn(0, 100)
+        set(v) = sp.edit().putInt(KEY_SHADE_BLUR, v.coerceIn(0, 100)).apply()
+
+    /** 下拉通知栏是否铺系统背景色（默认开，关掉只留模糊与壁纸） */
+    var shadeBackground: Boolean
+        get() = sp.getBoolean(KEY_SHADE_BG, true)
+        set(v) = sp.edit().putBoolean(KEY_SHADE_BG, v).apply()
 
     companion object {
         const val FILE = "dock_prefs"
@@ -163,9 +183,14 @@ class DockPrefs(context: Context) {
 
         /** 默认上限：状态栏里留出足够位置给左边的时钟 / 通知图标 */
         const val DEFAULT_DOCK_MAX_DP = 220
+        const val DEFAULT_GAME_BUBBLE_DP = 44
+        private const val KEY_GAME_BUBBLE = "game_bubble"
+        private const val KEY_GAME_BUBBLE_DP = "game_bubble_dp"
         private const val KEY_NYAN_STYLE = "nyan_style"
         private const val KEY_ALBUM_BG = "album_art_bg"
         private const val KEY_ALBUM_THUMB = "album_thumb"
         private const val KEY_CPU_CHART = "cpu_chart"
+        private const val KEY_SHADE_BLUR = "shade_blur_percent"
+        private const val KEY_SHADE_BG = "shade_background"
     }
 }

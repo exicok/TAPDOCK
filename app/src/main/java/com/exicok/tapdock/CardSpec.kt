@@ -58,11 +58,16 @@ data class CardInfo(val id: String, val label: String, val iconRes: Int)
  */
 object Cards {
 
-    fun resolve(order: List<String>, catalog: List<SysEntry>): List<CardInfo> {
+    fun resolve(
+        order: List<String>,
+        catalog: List<SysEntry>,
+        hidden: Set<String> = emptySet(),
+    ): List<CardInfo> {
         val sysBySpec = catalog.associateBy { it.spec }
         val rest = CardSpec.values().associateBy({ it.id }, { it }).toMutableMap()
         val out = ArrayList<CardInfo>(order.size)
         for (id in order) {
+            if (CardIds.isHidden(id)) continue
             if (CardIds.isSys(id)) {
                 val spec = CardIds.specOf(id)
                 out.add(
@@ -73,8 +78,10 @@ object Cards {
                 out.add(CardInfo(native.id, native.label, native.iconRes))
             }
         }
-        // 原生卡片一条都不能丢：顺序表没列到的按声明顺序补在后面
-        rest.values.forEach { out.add(CardInfo(it.id, it.label, it.iconRes)) }
+        // 顺序表没列到的原生卡片按声明顺序补在后面；被明确删除的不补
+        rest.values.forEach {
+            if (it.id !in hidden) out.add(CardInfo(it.id, it.label, it.iconRes))
+        }
         return out
     }
 }

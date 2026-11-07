@@ -20,7 +20,9 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.animation.PathInterpolator
 import android.widget.ImageView
@@ -31,6 +33,7 @@ import de.robv.android.xposed.XposedBridge
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 
 /**
  * Dock 接管的通知横幅。
@@ -44,7 +47,7 @@ import java.util.Locale
  * 所以整段位移是逐帧 updateViewLayout 挪窗口坐标做出来的。
  *
  * 一次只显示一张：新通知到了就直接把卡片内容换成最新的那条（不重放动画），不排队攒着；
- * 点一下打开应用并收起，超时也收起。
+ * 点一下打开应用并收起，横向滑动可甩走，超时也收起。
  *
  * 少数聒噪源（系统流量警告）另有一小时一次的限流，见 [HOURLY_SOURCES]。
  */
@@ -91,6 +94,8 @@ object NotificationCard {
         val time: String,
         val icon: Drawable?,
         val open: PendingIntent?,
+        /** 来电信息常驻到接通 / 挂断，不走 5 秒自动收起 */
+        val sticky: Boolean = false,
     )
 
     private var wm: WindowManager? = null
@@ -144,8 +149,8 @@ object NotificationCard {
         ranking: NotificationListenerService.RankingMap?,
     ) {
         appContext = ctx
-        val n = sbn.notification ?: return
         if (!screenOn(ctx)) return
+        val n = sbn.notification ?: return
         if (!interruptive(sbn, n, ranking)) return
         // 监听器重连时系统会把还活着的通知整批重投一遍（重启 SystemUI、模块更新都会），
         // 那是历史不是新消息，只认刚到的
@@ -159,21 +164,38 @@ object NotificationCard {
             XposedBridge.log("[TapDock] 一小时内不重复弹：$source")
             return
         }
+        val item = itemOf(ctx, sbn, sticky = false) ?: return
+        main.post { enqueue(ctx, item) }
+    }
+
+    /**
+     * 来电信息：跳过重要度 / 新鲜度 / 限流判断，直接上屏并常驻，
+     * 直到来电通知被撤或变成通话中（由 HookDock 调 [onRemoved]）。
+     */
+    fun showCall(ctx: Context, sbn: StatusBarNotification) {
+        appContext = ctx
+        if (!screenOn(ctx)) return
+        val item = itemOf(ctx, sbn, sticky = true) ?: return
+        main.post { enqueue(ctx, item) }
+    }
+
+    private fun itemOf(ctx: Context, sbn: StatusBarNotification, sticky: Boolean): Item? {
+        val n = sbn.notification ?: return null
         val body = n.extras?.getCharSequence(Notification.EXTRA_TEXT)?.toString()
             ?: n.extras?.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
         val head = n.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString()
             ?: n.extras?.getCharSequence(Notification.EXTRA_TITLE_BIG)?.toString() ?: ""
         val title = head.ifEmpty { HookDock.appLabel(ctx, sbn.packageName) }
-        if (title.isEmpty() && body.isEmpty()) return
-        val item = Item(
+        if (title.isEmpty() && body.isEmpty()) return null
+        return Item(
             key = "${sbn.packageName}:${sbn.id}",
             title = title,
             text = body,
             time = timeFmt.format(Date(sbn.postTime)),
             icon = iconOf(ctx, sbn),
             open = n.contentIntent,
+            sticky = sticky,
         )
-        main.post { enqueue(ctx, item) }
     }
 
     /**
@@ -256,6 +278,8 @@ object NotificationCard {
     private fun enqueue(ctx: Context, item: Item) {
         val v = card
         if (v != null && !closing) {
+            // 来电信息常驻期间，普通通知不抢屏；来电本身 / 后续来电更新照常换字
+            if (current?.sticky == true && !item.sticky) return
             // 卡片正显示：新通知直接把内容换掉，不重放动画——一屏就一张，最新那条说话
             bind(item)
             restartTimer()
@@ -434,6 +458,57 @@ object NotificationCard {
             current?.let { openApp(it) }
             hide()
         }
+        // 横向滑动收起：窗口跟着手指走，松手超过阈值就甩出屏幕，否则弹回原位
+        val slop = ViewConfiguration.get(ctx).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        var baseX = 0
+        var dragging = false
+        root.setOnTouchListener { view, ev ->
+            if (closing) return@setOnTouchListener false
+            val p = lp ?: return@setOnTouchListener false
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = ev.rawX
+                    downY = ev.rawY
+                    baseX = p.x
+                    dragging = false
+                    main.removeCallbacks(expire)
+                    true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = ev.rawX - downX
+                    val dy = ev.rawY - downY
+                    if (!dragging && abs(dx) > slop && abs(dx) > abs(dy)) dragging = true
+                    if (dragging) {
+                        p.x = (baseX + dx).toInt()
+                        try {
+                            wm?.updateViewLayout(view, p)
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    true
+                }
+
+                MotionEvent.ACTION_UP -> {
+                    if (dragging) {
+                        swipeFinish(view, p, baseX, ev.rawX - downX)
+                    } else {
+                        restartTimer()
+                        view.performClick()
+                    }
+                    true
+                }
+
+                MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) swipeFinish(view, p, baseX, 0f) else restartTimer()
+                    true
+                }
+
+                else -> true
+            }
+        }
         bind(item)
         return root
     }
@@ -451,6 +526,64 @@ object NotificationCard {
         bv.visibility = if (item.text.isEmpty()) View.GONE else View.VISIBLE
         rv.text = item.time
         current = item
+    }
+
+    // ------------------------------------------------------------------ 滑动收起
+
+    /** 松手：超过屏宽 28% 就甩出屏幕，否则弹回原位 */
+    private fun swipeFinish(
+        v: View,
+        p: WindowManager.LayoutParams,
+        baseX: Int,
+        dx: Float,
+    ) {
+        if (abs(dx) > v.resources.displayMetrics.widthPixels * 0.28f) {
+            swipeOut(v, p, dx)
+            return
+        }
+        val from = p.x
+        val a = ValueAnimator.ofFloat(0f, 1f)
+        a.duration = 180L
+        a.interpolator = interp
+        a.addUpdateListener {
+            p.x = (from + (baseX - from) * it.animatedFraction).toInt()
+            try {
+                wm?.updateViewLayout(v, p)
+            } catch (_: Throwable) {
+            }
+        }
+        a.start()
+        restartTimer()
+    }
+
+    /** 甩出屏幕后直接撤卡，接下一张（不走缩回 Dock 的那套动画） */
+    private fun swipeOut(v: View, p: WindowManager.LayoutParams, dx: Float) {
+        if (closing) return
+        closing = true
+        main.removeCallbacks(expire)
+        val toX = if (dx >= 0) v.resources.displayMetrics.widthPixels else -v.width
+        val fromX = p.x
+        val a = ValueAnimator.ofFloat(0f, 1f)
+        a.duration = 200L
+        a.interpolator = interp
+        a.addUpdateListener {
+            val f = it.animatedFraction
+            p.x = (fromX + (toX - fromX) * f).toInt()
+            v.alpha = 1f - f
+            try {
+                wm?.updateViewLayout(v, p)
+            } catch (_: Throwable) {
+            }
+        }
+        a.addListener(object : AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: Animator) {
+                closing = false
+                removeCard()
+                appContext?.let { pump(it) }
+            }
+        })
+        a.start()
+        anim = a
     }
 
     // ------------------------------------------------------------------ 收起
@@ -492,6 +625,8 @@ object NotificationCard {
 
     private fun restartTimer() {
         main.removeCallbacks(expire)
+        // 来电信息等接通 / 挂断，不按横幅的 5 秒超时收
+        if (current?.sticky == true) return
         main.postDelayed(expire, SHOW_MS)
     }
 

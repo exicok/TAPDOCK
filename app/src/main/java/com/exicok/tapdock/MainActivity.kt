@@ -24,6 +24,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.slider.Slider
 import java.io.DataOutputStream
 
 /**
@@ -47,7 +48,7 @@ class MainActivity : AppCompatActivity() {
 
     private val pcolorViews = mutableListOf<View>()
     private var previewCard: View? = null
-    private var tab = TAB_DOCK
+    private var tab = TAB_CENTER
 
     /** 未读短信里的取件码要先拿到 READ_SMS */
     private val smsPermission =
@@ -88,9 +89,10 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<BottomNavigationView>(R.id.bottom_nav).setOnItemSelectedListener { item ->
             tab = when (item.itemId) {
-                R.id.tab_panel -> TAB_PANEL
+                R.id.tab_systemui -> TAB_SYSTEMUI
+                R.id.tab_game -> TAB_GAME
                 R.id.tab_about -> TAB_ABOUT
-                else -> TAB_DOCK
+                else -> TAB_CENTER
             }
             renderTab()
             scroll.post { scroll.fullScroll(View.FOCUS_UP) }
@@ -152,13 +154,15 @@ class MainActivity : AppCompatActivity() {
         tvDlSub = null
         previewCard = null
         when (tab) {
-            TAB_PANEL -> panelTab()
+            TAB_SYSTEMUI -> systemUiTab()
+            TAB_GAME -> gameTab()
             TAB_ABOUT -> aboutTab()
-            else -> dockTab()
+            else -> centerTab()
         }
     }
 
-    private fun dockTab() {
+    /** 控制中心分类：Dock 本体、进度显示与控制中心卡片合并在这里 */
+    private fun centerTab() {
         previewRow()
         sectionHeader(R.drawable.ic_nav_dock, R.string.sec_dock_body)
         switchRow(R.drawable.ic_nav_dock, R.string.main_hook_switch, R.string.sub_hook_switch, prefs.hookEnabled) {
@@ -213,10 +217,6 @@ class MainActivity : AppCompatActivity() {
             syncToHook()
         }
         downloadRow()
-        footer()
-    }
-
-    private fun panelTab() {
         sectionHeader(R.drawable.ic_nav_panel, R.string.sec_cards)
         actionRow(R.drawable.ic_nav_panel, R.string.opt_card_order, R.string.sub_cards) {
             startActivity(Intent(this, CardOrderActivity::class.java))
@@ -226,11 +226,94 @@ class MainActivity : AppCompatActivity() {
             prefs.cpuChart = it
             syncToHook()
         }
+        footer()
+    }
+
+    /** SystemUI 分类：下拉通知栏的模糊度与背景色 */
+    private fun systemUiTab() {
+        sectionHeader(R.drawable.ic_tile_sys, R.string.sec_systemui)
+        shadeBlurRow()
+        switchRow(
+            R.drawable.ic_row_color, R.string.opt_shade_bg, R.string.sub_shade_bg,
+            prefs.shadeBackground,
+        ) {
+            prefs.shadeBackground = it
+            syncToHook()
+        }
+    }
+
+    /** 游戏分类：前台游戏时叠在画面上的悬浮图标 */
+    private fun gameTab() {
+        sectionHeader(R.drawable.ic_tile_game, R.string.sec_game)
+        switchRow(
+            R.drawable.ic_tile_game, R.string.opt_game_bubble, R.string.sub_game_bubble,
+            prefs.gameBubble,
+        ) {
+            prefs.gameBubble = it
+            syncToHook()
+        }
+        gameBubbleSizeRow()
+        val hint = TextView(this).apply {
+            text = getString(R.string.game_hint)
+            setTextAppearance(R.style.Text_Desc)
+            setPadding(dp(4), dp(14), dp(4), dp(4))
+            setLineSpacing(dp(3).toFloat(), 1f)
+        }
+        content.addView(hint, matchWrap())
+    }
+
+    /** 悬浮图标三档；改完立刻广播，下一拍就按新尺寸重建窗口 */
+    private fun gameBubbleSizeRow() {
+        val v = row(
+            R.drawable.ic_row_width,
+            getString(R.string.opt_game_bubble_size),
+            getString(R.string.sub_game_bubble_size),
+        )
+        val extra = v.findViewById<LinearLayout>(R.id.ll_extra)
+        extra.visibility = View.VISIBLE
+        GAME_BUBBLE_SIZES.forEachIndexed { i, size ->
+            extra.addView(
+                segButton(getString(GAME_BUBBLE_LABELS[i]), prefs.gameBubbleDp == size) {
+                    if (prefs.gameBubbleDp == size) return@segButton
+                    prefs.gameBubbleDp = size
+                    renderTab()
+                    syncToHook()
+                }
+            )
+        }
+    }
+
+    /** 通知栏模糊度：百分比相对系统上限，0% 即关闭；拖动即时广播给 SystemUI */
+    private fun shadeBlurRow() {
+        val v = row(
+            R.drawable.ic_tile_sys,
+            getString(R.string.opt_shade_blur),
+            getString(R.string.sub_shade_blur),
+        )
+        val trail = v.findViewById<TextView>(R.id.tv_trail)
+        trail.visibility = View.VISIBLE
+        trail.text = getString(R.string.blur_percent_fmt, prefs.shadeBlurPercent)
+        val extra = v.findViewById<LinearLayout>(R.id.ll_extra)
+        extra.visibility = View.VISIBLE
+        val slider = Slider(this).apply {
+            valueFrom = 0f
+            valueTo = 100f
+            stepSize = 1f
+            value = prefs.shadeBlurPercent.toFloat()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            addOnChangeListener { _, value, _ ->
+                val percent = value.toInt()
+                prefs.shadeBlurPercent = percent
+                trail.text = getString(R.string.blur_percent_fmt, percent)
+                syncToHook()
+            }
+        }
+        extra.addView(slider)
     }
 
     /**
      * 关于分类：目前只有引用库一个入口，以后加更新日志、反馈也放这儿。
-     * 顶部三分类导航的第三项（res/menu/bottom_nav.xml 的 tab_about）。
+     * 底部三分类导航的第三项（res/menu/bottom_nav.xml 的 tab_about）。
      */
     private fun aboutTab() {
         sectionHeader(R.drawable.ic_nav_about, R.string.sec_about)
@@ -598,9 +681,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val TAB_DOCK = 0
-        private const val TAB_PANEL = 1
-        private const val TAB_ABOUT = 2
+        private const val TAB_CENTER = 0
+        private const val TAB_SYSTEMUI = 1
+        private const val TAB_GAME = 2
+        private const val TAB_ABOUT = 3
+
+        /** 悬浮游戏图标直径档位（dp） */
+        private val GAME_BUBBLE_SIZES = intArrayOf(36, 44, 52)
+        private val GAME_BUBBLE_LABELS = intArrayOf(
+            R.string.bubble_size_small, R.string.bubble_size_standard, R.string.bubble_size_large,
+        )
 
         /** Dock 最大宽度档位（dp，0 = 不限） */
         private val MAX_WIDTHS = intArrayOf(160, 220, 280, 0)

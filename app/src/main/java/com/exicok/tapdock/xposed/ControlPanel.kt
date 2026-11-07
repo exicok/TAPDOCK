@@ -1,9 +1,13 @@
 package com.lsp102.tapdock.xposed
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.bluetooth.BluetoothAdapter
 import android.app.ActivityManager
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentCallbacks
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -11,9 +15,7 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.TrafficStats
-import android.net.wifi.WifiManager as WifiManagerAlias
 import android.graphics.Rect
-import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.Region
 import android.graphics.RegionIterator
@@ -37,8 +39,9 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
-import android.view.animation.OvershootInterpolator
+import android.view.animation.Interpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -97,11 +100,9 @@ object ControlPanel {
     /** 面板距屏幕顶部（状态栏下方）的间距 */
     private const val TOP_MARGIN_DP = 16
 
-    /** macOS 式开/关窗动画：从顶边中心缩放 + 淡入，末尾轻微回弹 */
+    /** 通知栏式展开/收起：面板从状态栏下沿滑出（收起时滑回去），遮罩同步淡入淡出 */
     private const val OPEN_MS = 320L
     private const val CLOSE_MS = 200L
-    private const val ANIM_SCALE = 0.82f
-    private const val OPEN_OVERSHOOT = 1.4f
 
     /**
      * 差分类读数（CPU 条 / 速率 / 帧率）的补拍：面板每秒那一拍才是稳态节奏，
@@ -114,6 +115,9 @@ object ControlPanel {
 
     private var panelView: LinearLayout? = null
     private var panelWm: WindowManager? = null
+
+    /** 展开/收起时驱动窗口 y 的动画；关窗或旋转重建时先取消 */
+    private var panelAnimator: ValueAnimator? = null
 
     /** 整屏毛玻璃层：铺在面板下面，只把 Dock 那块留清晰 */
     private var backdropBlurView: View? = null
@@ -146,6 +150,17 @@ object ControlPanel {
     /** 本次展开用几列，由面板可用宽度决定（见 show 里的计算） */
     private var panelCols = 2
 
+    /** 面板打开期间挂到 SystemUI Application 上，横竖屏切换时按新方向重建 */
+    private var panelAppCtx: Context? = null
+    private var openedOrientation = Configuration.ORIENTATION_UNDEFINED
+    private val configCallbacks = object : ComponentCallbacks {
+        override fun onConfigurationChanged(newConfig: Configuration) {
+            main.post { rebuildForOrientation() }
+        }
+
+        override fun onLowMemory() {}
+    }
+
     /** 多进度显示区：下载按应用各占一行，行数随并发下载数变化 */
     private var progressBox: LinearLayout? = null
     private val progressRows = mutableListOf<ProgressRow>()
@@ -168,13 +183,12 @@ object ControlPanel {
         var shown: Bitmap? = null,
     )
 
-    /** 状态区：蜂窝信号 / 电量 / WLAN 信号 / 网络上下行 / 当前页面帧率，面板开着时跟着 1 秒节拍刷新 */
+    /** 状态区：蜂窝信号 / 电量 / WLAN 信号 / 网络上下行，面板开着时跟着 1 秒节拍刷新 */
     private class StatusRefs(
         val cell: TextView,
         val battery: TextView,
         val wifi: TextView,
         val traffic: TextView,
-        val fps: TextView,
     )
 
     private var statusRefs: StatusRefs? = null
@@ -312,32 +326,112 @@ object ControlPanel {
         }
     }
 
-    /** 关面板：先播 macOS 式关窗动画（缩回 + 淡出），动画跑完才真正移除窗口 */
+    /** 关面板：面板向上收进状态栏、遮罩淡出，动画跑完才真正移除窗口 */
     fun dismiss() {
         if (closing) return
         val panel = panelView
+        val wm = panelWm
         val backdrop = backdropBlurView
         closing = true
         main.removeCallbacks(musicTick)
         main.removeCallbacks(statusWarm)
         connectRefresh = emptyList()
         backdrop?.animate()?.alpha(0f)?.setDuration(CLOSE_MS)?.start()
-        if (panel == null) {
+        if (panel == null || wm == null) {
             removePanelViews()
             return
         }
-        panel.animate()
-            .alpha(0f)
-            .scaleX(ANIM_SCALE)
-            .scaleY(ANIM_SCALE)
-            .setDuration(CLOSE_MS)
-            .setInterpolator(DecelerateInterpolator())
-            .withEndAction { removePanelViews() }
-            .start()
+        val lp = panel.layoutParams as? WindowManager.LayoutParams
+        if (lp == null) {
+            removePanelViews()
+            return
+        }
+        animatePanelHeight(
+            wm, panel, lp,
+            from = panel.height.coerceAtLeast(1),
+            to = 1,
+            duration = CLOSE_MS,
+            interpolator = AccelerateInterpolator(),
+        ) { removePanelViews() }
+    }
+
+    /**
+     * 通知栏式展开/收起：窗口高度从 [from] 长到 [to]（或反向收缩），内容被窗口下沿裁住，
+     * 看起来就是从状态栏下方展开 / 收回去。逐帧改 WindowManager.LayoutParams 高度。
+     */
+    private fun animatePanelHeight(
+        wm: WindowManager,
+        panel: View,
+        lp: WindowManager.LayoutParams,
+        from: Int,
+        to: Int,
+        duration: Long,
+        interpolator: Interpolator,
+        onEnd: (() -> Unit)? = null,
+    ) {
+        cancelPanelAnimation()
+        lp.height = from
+        try {
+            wm.updateViewLayout(panel, lp)
+        } catch (_: Throwable) {
+        }
+        val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+            this.duration = duration
+            this.interpolator = interpolator
+            addUpdateListener {
+                val fraction = animatedValue as Float
+                lp.height = (from + (to - from) * fraction).toInt().coerceAtLeast(1)
+                try {
+                    wm.updateViewLayout(panel, lp)
+                } catch (_: Throwable) {
+                }
+            }
+        }
+        anim.addListener(object : AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: Animator) {
+                if (panelAnimator === anim) {
+                    panelAnimator = null
+                    onEnd?.invoke()
+                }
+            }
+        })
+        panelAnimator = anim
+        anim.start()
+    }
+
+    /** 停掉正在跑的展开/收起动画；被取消的动画不会执行收尾动作 */
+    private fun cancelPanelAnimation() {
+        val anim = panelAnimator
+        panelAnimator = null
+        anim?.cancel()
+    }
+
+    /**
+     * 横竖屏切换：旧窗口的宽度、列数和分栏结构都是按上一方向算的，直接摘掉重开，
+     * 让 [buildPanel] 按新方向重新分栏 / 重算列数（否则竖屏会沿用横屏的 4 列网格）。
+     */
+    private fun rebuildForOrientation() {
+        if (panelView == null || closing) return
+        val ctx = panelAppCtx ?: return
+        val orientation = ctx.resources.configuration.orientation
+        if (orientation == openedOrientation) return
+        val anchor = HookDock.dockRootView() ?: backdropBlurAnchor
+        XposedBridge.log("[TapDock] control panel rebuild for orientation $orientation")
+        removePanelViews()
+        if (anchor != null) show(anchor)
     }
 
     private fun removePanelViews() {
         closing = false
+        cancelPanelAnimation()
+        panelAppCtx?.let {
+            try {
+                it.unregisterComponentCallbacks(configCallbacks)
+            } catch (_: Throwable) {
+            }
+        }
+        panelAppCtx = null
+        openedOrientation = Configuration.ORIENTATION_UNDEFINED
         HookDock.setPanelOpen(false)
         // 游戏信息的采集降回"只要图标亮灭"的节奏，别为了关着的面板每五秒 dumpsys 一次
         GameInfoSource.panelOpen(false)
@@ -382,17 +476,24 @@ object ControlPanel {
         try {
             val ctx = anchor.context.applicationContext
             val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            val panel = buildPanel(ctx)
 
             val sideMargin = dp(ctx, SIDE_MARGIN_DP)
             val metrics = ctx.resources.displayMetrics
-            // 不封顶宽度：跟 LOS 的 shade 一样铺满可用区域，多出来的宽度换成列数而不是拉长卡片
+            // 不封顶宽度：跟 LOS 的 shade 一样铺满可用区域，多出来的宽度换成列数而不是拉长卡片。
+            // 必须在 buildPanel 之前算好：竖屏重建时若沿用上次横屏的列数，网格会一直是 4 列。
             val width = metrics.widthPixels - sideMargin * 2
             panelCols = (width / metrics.density / MIN_CARD_WIDTH_DP).toInt()
                 .coerceIn(2, MAX_COLS)
+            val panel = buildPanel(ctx)
+            // 先量出面板最终高度：窗口从 1px 长到它，做出通知栏那样从状态栏向下展开的效果
+            panel.measure(
+                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            )
+            val openHeight = panel.measuredHeight
             val lp = WindowManager.LayoutParams(
                 width,
-                WindowManager.LayoutParams.WRAP_CONTENT,
+                1,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
@@ -430,30 +531,54 @@ object ControlPanel {
                         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                 }
             }
+            backdrop.alpha = 0f
             wm.addView(backdrop, backdropLp)
             backdropBlurView = backdrop
             backdropBlurWm = wm
             backdropBlurAnchor = anchor
 
-            // 首帧之前先设成"小且透明"，免得面板以最终尺寸闪一帧
-            panel.alpha = 0f
-            panel.scaleX = ANIM_SCALE
-            panel.scaleY = ANIM_SCALE
+            // 窗口初始只有 1px 高，首帧不会露出完整面板
             wm.addView(panel, lp)
             panelView = panel
             panelWm = wm
+            openedOrientation = ctx.resources.configuration.orientation
+            if (panelAppCtx == null) {
+                panelAppCtx = ctx.applicationContext
+                try {
+                    ctx.applicationContext.registerComponentCallbacks(configCallbacks)
+                } catch (t: Throwable) {
+                    panelAppCtx = null
+                    XposedBridge.log("[TapDock] config callback register failed: $t")
+                }
+            }
             // 面板展开期间 Dock 收成一颗返回图标
             HookDock.setPanelOpen(true)
             panel.doOnPreDraw {
-                // 以顶边中心为原点撑开，像 macOS 从标题栏位置展开窗口
-                panel.pivotX = panel.width / 2f
-                panel.pivotY = 0f
-                panel.animate()
+                if (openHeight > 0) {
+                    animatePanelHeight(
+                        wm, panel, lp,
+                        from = 1,
+                        to = openHeight,
+                        duration = OPEN_MS,
+                        interpolator = DecelerateInterpolator(),
+                    ) {
+                        lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+                        try {
+                            wm.updateViewLayout(panel, lp)
+                        } catch (_: Throwable) {
+                        }
+                    }
+                } else {
+                    lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+                    try {
+                        wm.updateViewLayout(panel, lp)
+                    } catch (_: Throwable) {
+                    }
+                }
+                backdrop.animate()
                     .alpha(1f)
-                    .scaleX(1f)
-                    .scaleY(1f)
                     .setDuration(OPEN_MS)
-                    .setInterpolator(OvershootInterpolator(OPEN_OVERSHOOT))
+                    .setInterpolator(DecelerateInterpolator())
                     .start()
             }
             if (Build.VERSION.SDK_INT >= 31) {
@@ -545,13 +670,17 @@ object ControlPanel {
                 )
             }
         })
-        // 顺序表里原生 id 和 sys: id 是混排的，逐条解析；没列到的原生卡片按声明顺序补在后面
+        // 顺序表里原生 id 和 sys: id 是混排的，逐条解析；没列到的原生卡片按声明顺序补在后面，
+        // 但带 ! 前缀的表示用户在排序页删掉了，不能补回来
+        val rawOrder = HookDock.cardOrder()
+        val hidden = rawOrder.filter { CardIds.isHidden(it) }.mapTo(HashSet()) { CardIds.hiddenOf(it) }
         val rest = LinkedHashMap(byId)
         val defs = ArrayList<TileDef>(rest.size + 4)
-        for (id in HookDock.cardOrder()) {
+        for (id in rawOrder) {
+            if (CardIds.isHidden(id)) continue
             if (CardIds.isSys(id)) defs.add(sysCard(ctx, id)) else rest.remove(id)?.let { defs.add(it) }
         }
-        defs.addAll(rest.values)
+        rest.values.forEach { if (it.id !in hidden) defs.add(it) }
         cardDefs = defs
         val style = CardStyle(accent, inactiveBg, chipOff, iconOff, contentOn, contentOff)
         if (ctx.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
@@ -1046,7 +1175,7 @@ object ControlPanel {
                         Rect(dock.right - corner, top, dock.right, top + corner),
                         Rect(left, dock.bottom - corner, left + corner, dock.bottom),
                         Rect(dock.right - corner, dock.bottom - corner, dock.right, dock.bottom),
-                    ).forEach { regions += blurRegion(radiusPx, it) ?: return false }
+                    ).forEach { regions += SystemBlur.region(radiusPx, it) ?: return false }
                 }
             }
 
@@ -1069,9 +1198,9 @@ object ControlPanel {
             val iterator = RegionIterator(visible)
             val rect = Rect()
             while (iterator.next(rect)) {
-                regions += blurRegion(radiusPx, rect) ?: return false
+                regions += SystemBlur.region(radiusPx, rect) ?: return false
             }
-            val applied = applyRegionBlur(backdrop, regions.toTypedArray(), radiusPx)
+            val applied = SystemBlur.apply(backdrop, regions.toTypedArray(), radiusPx)
             if (applied) {
                 if (!backdropBlurActive) {
                     XposedBridge.log("[TapDock] backdrop region blur applied (${regions.size} regions)")
@@ -1084,108 +1213,6 @@ object ControlPanel {
                 XposedBridge.log("[TapDock] backdrop region blur unavailable: $t")
             }
             false
-        }
-    }
-
-    /**
-     * 把 [regions] 圈出的部分在 [target] 所在窗口身后糊掉：SystemUI 自己 BlurUtils 那条路
-     * （setBlurRegions + backgroundBlurRadius，经 RenderThread 随帧生效）。
-     * regions 传空数组、radiusPx 传 0 就是把之前的模糊撤掉。
-     */
-    private fun applyRegionBlur(
-        target: View,
-        regions: Array<FloatArray>,
-        radiusPx: Int,
-    ): Boolean {
-        val root = target.rootView ?: return false
-        val viewRootImpl = root.call("getViewRootImpl") ?: return false
-        val sc = viewRootImpl.call("getSurfaceControl") as? android.view.SurfaceControl
-            ?: return false
-        if (!sc.isValid) return false
-
-        val transactionClass = Class.forName("android.view.SurfaceControl\$Transaction")
-        val transaction = transactionClass.getConstructor().newInstance()
-        val setBlurRegions = transactionClass.methods.firstOrNull {
-            it.name == "setBlurRegions" && it.parameterCount == 2
-        } ?: throw NoSuchMethodException("SurfaceControl.Transaction.setBlurRegions")
-        setBlurRegions.invoke(transaction, sc, regions)
-
-        val builder = Class.forName(
-            "android.view.SyncRtSurfaceTransactionApplier\$SurfaceParams\$Builder"
-        ).getConstructor(android.view.SurfaceControl::class.java).newInstance(sc)
-        builder.require("withMergeTransaction", transaction)
-        builder.require("withBackgroundBlurRadius", radiusPx)
-        builder.call("withBackgroundBlurScale", 1f)
-        builder.call("withOpaque", false)
-        val params = builder.require("build") ?: return false
-
-        val applier = Class.forName("android.view.SyncRtSurfaceTransactionApplier")
-            .getConstructor(View::class.java).newInstance(root)
-        val arr = java.lang.reflect.Array.newInstance(params.javaClass, 1)
-        java.lang.reflect.Array.set(arr, 0, params)
-        applier.require("scheduleApply", arr)
-        return true
-    }
-
-    /**
-     * SurfaceFlinger 的模糊区数组各版本长度不同：Android 16 及以前每个区 10 个 float，
-     * Android 17 起 14 个（四角各带 x/y 两个半径）。长度给短了 native 不抛可捕获的异常，
-     * 而是直接 abort 掉整个 SystemUI，所以优先让平台的 BlurRegion 自己生成数组；
-     * 只有确认是老版本（有 RoundedRectBlurRegion 之前的 10-float 格式）才手搓。
-     */
-    private fun blurRegion(radiusPx: Int, rect: Rect): FloatArray? =
-        platformBlurRegion(radiusPx, rect) ?: legacyBlurRegion(radiusPx, rect)
-
-    /** RectF + 8 个角半径 + 不透明度 + 模糊半径（平台这个构造器 alpha 在前），缩放 1、偏移 0 即原样输出 */
-    private fun platformBlurRegion(radiusPx: Int, rect: Rect): FloatArray? {
-        val ctor = blurRegionCtor ?: return null
-        val toArray = blurRegionToArray ?: return null
-        return try {
-            val region = ctor.newInstance(
-                RectF(
-                    rect.left.toFloat(), rect.top.toFloat(),
-                    rect.right.toFloat(), rect.bottom.toFloat()
-                ),
-                FloatArray(8),
-                1f, radiusPx.toFloat()
-            )
-            toArray.invoke(region, 0, 0, 1f, 1f) as? FloatArray
-        } catch (t: Throwable) {
-            null
-        }
-    }
-
-    /** 模糊半径、不透明度、left/top/right/bottom，最后是四角的圆角半径 */
-    private fun legacyBlurRegion(radiusPx: Int, rect: Rect): FloatArray? {
-        if (Build.VERSION.SDK_INT >= 37) return null
-        return floatArrayOf(
-            radiusPx.toFloat(),
-            1f,
-            rect.left.toFloat(),
-            rect.top.toFloat(),
-            rect.right.toFloat(),
-            rect.bottom.toFloat(),
-            0f, 0f, 0f, 0f,
-        )
-    }
-
-    private val blurRegionCtor by lazy(LazyThreadSafetyMode.NONE) {
-        try {
-            Class.forName("android.view.RoundedRectBlurRegion").getConstructor(
-                RectF::class.java, FloatArray::class.java,
-                Float::class.javaPrimitiveType, Float::class.javaPrimitiveType
-            )
-        } catch (t: Throwable) {
-            null
-        }
-    }
-
-    private val blurRegionToArray by lazy(LazyThreadSafetyMode.NONE) {
-        try {
-            Class.forName("android.view.RoundedRectBlurRegion").methods
-                .firstOrNull { it.name == "toFloatArray" && it.parameterCount == 4 }
-        } catch (t: Throwable) {
-            null
         }
     }
 
@@ -1204,8 +1231,8 @@ object ControlPanel {
     // ------------------------------------------------------------------ 状态区
 
     /**
-     * 控制区与进度区之间的一块实时读数：一行五格等分（蜂窝信号 / 电量 / WLAN 信号 / 上下行速率 /
-     * 当前页面帧率），App 里开了 CPU 图再补一行全核心竖柱。
+     * 控制区与进度区之间的一块实时读数：一行四格等分（蜂窝信号 / 电量 / WLAN 信号 / 上下行速率），
+     * App 里开了 CPU 图再补一行全核心竖柱。
      * 文案压到"标签 + 短值"是因为一格只有 ~48dp，长一点的单位就溢出成省略号了。
      */
     private fun addStatusSection(parent: LinearLayout, night: Boolean, content: Int, accent: Int) {
@@ -1219,7 +1246,7 @@ object ControlPanel {
             setPadding(dp(ctx, 10), dp(ctx, 7), dp(ctx, 10), dp(ctx, 7))
         }
         val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        val refs = List(5) {
+        val refs = List(4) {
             TextView(ctx).apply {
                 textSize = 11f
                 maxLines = 1
@@ -1241,11 +1268,11 @@ object ControlPanel {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
-        statusRefs = StatusRefs(refs[0], refs[1], refs[2], refs[3], refs[4])
+        statusRefs = StatusRefs(refs[0], refs[1], refs[2], refs[3])
         // 游戏信息行：只有前台是游戏且 Game SDK 报得出数据时才占一行
         val game = TextView(ctx).apply {
             textSize = 11f
-            // 五个字段一行放不下，加上图形 API 那条详情最多三行，别把帧率挤没
+            // 几个字段一行放不下，加上图形 API 那条详情最多三行，别把刷新率挤没
             maxLines = 3
             gravity = Gravity.CENTER
             setTextColor(accent)
@@ -1276,8 +1303,6 @@ object ControlPanel {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(ctx, 6) }
         )
-        // 帧率窗口从面板出现这一拍算起，别把面板关着期间攒的帧数平均进来
-        FpsMonitor.openWindow()
         // 建面板时就取一次值，和进度区一样跟着控制中心同帧出现
         refreshStatus(ctx)
         XposedBridge.log("[TapDock] status area: " + refs.joinToString(" | ") { it.text.toString() })
@@ -1374,13 +1399,8 @@ object ControlPanel {
                 tv.visibility = View.GONE
             } else {
                 val hz = refreshHz(ctx)
-                val rate = when {
-                    gi.fps.isNotEmpty() && hz > 0 -> "${gi.fps}帧/${hz}Hz"
-                    gi.fps.isNotEmpty() -> "${gi.fps}帧"
-                    hz > 0 -> "${hz}Hz"
-                    else -> null
-                }
-                // 帧数是两次采样之间的差分，头一格必空；这时只报刷新率，不写 0 帧冒充
+                // 控制中心不再显示 FPS，只保留屏幕刷新率
+                val rate = if (hz > 0) "${hz}Hz" else null
                 val head = listOfNotNull(
                     "游戏 ${gi.label}", api?.label ?: gi.api, gi.resolution, rate,
                     if (GameInfoSource.background) "后台" else "前台",
@@ -1429,7 +1449,7 @@ object ControlPanel {
     }
 
     /**
-     * 状态区里"要两拍做差分"的那几格：上下行速率、页面帧率、CPU/GPU/zram 三条图。
+     * 状态区里"要两拍做差分"的那几格：上下行速率、CPU/GPU/zram 三条图。
      * 第一拍必然没有基准，所以只有这几格单独有个短间隔的补拍（[statusWarm]），
      * 蜂窝/电量/WLAN 是现读的系统状态，跟着面板同帧就出来了。
      *
@@ -1438,8 +1458,6 @@ object ControlPanel {
     private fun refreshDiff(ctx: Context): Boolean {
         statusRefs?.let { refs ->
             refs.traffic.text = trafficText()
-            // 一次调用只取一次：sample() 会消费掉这一段的帧数窗口
-            refs.fps.text = "帧率 ${FpsMonitor.sample()}"
         }
         // 一次拍只发一次 root 采集请求：CPU / GPU / zram 和小窗卡要的按进程读数同属那一帧
         val pkgs = FreeformTopHook.windows().map { it.pkg }.distinct()
