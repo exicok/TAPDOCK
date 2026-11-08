@@ -35,6 +35,8 @@
     <string name="blur_percent_fmt">%1$d%%</string>
     <string name="opt_shade_bg">通知栏背景色</string>
     <string name="sub_shade_bg">关闭后下拉通知栏不再铺系统底色，只保留模糊与壁纸</string>
+    <string name="opt_unlock_rotate">每次解锁关闭自动旋转</string>
+    <string name="sub_unlock_rotate">解锁（密码 / 指纹 / 人脸）后自动关掉系统自动旋转；关闭此开关则不再干预</string>
 
     <string name="sec_about">关于</string>
     <string name="opt_libraries">开源引用库</string>

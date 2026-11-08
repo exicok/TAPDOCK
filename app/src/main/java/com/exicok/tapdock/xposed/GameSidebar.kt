@@ -21,7 +21,9 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.os.StatFs
 import android.provider.Settings
 import android.telephony.TelephonyManager
@@ -36,6 +38,9 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.XposedHelpers
+import java.io.FileDescriptor
+import java.io.FileInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -324,18 +329,38 @@ object GameSidebar {
         rows.clear()
 
         sectionTitle(ctx, parent, "游戏")
-        addRow(ctx, parent, com.lsp102.tapdock.R.drawable.ic_tile_game, "游戏帧率") { v, sub, _ ->
-            // 帧率跟图形 API 走同一条采集帧（GameInfoCollector 的 pkg|api|宽x高|帧率），
-            // 不再用控制中心那套页面帧率计数
+        addRow(ctx, parent, com.lsp102.tapdock.R.drawable.ic_tile_game, "帧率 / 刷新率") { v, sub, _ ->
+            // 帧率跟图形 API 走同一条采集帧（GameInfoCollector 的 pkg|api|宽x高|帧率）。
+            // Unity 游戏不走 HWUI，dumpsys gfxinfo 的Total frames 恒为 0；这台 ROM 的
+            // SurfaceFlinger --latency 也只回刷新周期、不给帧时间戳，所以实测 FPS 拿不到时
+            // 先读系统里游戏 SurfaceView 的 requestedFrameRate（ANativeWindow_setFrameRate 声明的
+            // 目标帧率），再退到屏幕刷新率，副标题都标明数据来路。
             val info = GameInfoSource.peek(ctx)
             val api = GraphicsApiSource.currentGraphicsApi()?.label ?: info?.api
             val fps = info?.fps?.takeIf { it.isNotBlank() }
-            v.text = if (fps != null) "$fps fps" else "--"
-            sub.text = when {
-                fps != null && api != null -> "$api · 图像 API 采集"
-                fps != null -> "图像 API 采集"
-                api != null -> "$api · 等待采集"
-                else -> "等待图形 API 数据"
+            val sysFps = if (fps == null) systemFrameRate(ctx) else 0f
+            val hz = displayRefreshRate(ctx)
+            when {
+                fps != null -> {
+                    v.text = "$fps fps"
+                    sub.text = if (api != null) "$api · 图像 API 采集" else "图像 API 采集"
+                }
+                sysFps > 0f -> {
+                    v.text = String.format(Locale.US, "%.0f fps", sysFps)
+                    sub.text = if (api != null) "$api · 系统请求帧率" else "系统请求帧率"
+                }
+                hz > 0f -> {
+                    v.text = String.format(Locale.US, "%.0f Hz", hz)
+                    sub.text = if (api != null) {
+                        "$api · 系统未提供实测 FPS"
+                    } else {
+                        "系统未提供实测 FPS"
+                    }
+                }
+                else -> {
+                    v.text = "--"
+                    sub.text = "等待图形 API 数据"
+                }
             }
         }
 
@@ -894,6 +919,174 @@ object GameSidebar {
         showing = false
         closing = false
         XposedBridge.log("[TapDock] status sidebar hidden")
+    }
+
+    /** 屏幕当前刷新率：Unity 游戏没有可读的实测 FPS 时用这个兜底，副标题会注明 */
+    private fun displayRefreshRate(ctx: Context): Float = try {
+        // SystemUI 的应用上下文不一定带 Display，getDisplay() 可能为空甚至抛异常，
+        // 再退到 WindowManager.defaultDisplay 取默认屏
+        val fromContext = if (Build.VERSION.SDK_INT >= 30) {
+            runCatching { ctx.display }.getOrNull()
+        } else {
+            null
+        }
+        @Suppress("DEPRECATION")
+        val fallback = (ctx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
+            ?.defaultDisplay
+        (fromContext ?: fallback)?.refreshRate ?: 0f
+    } catch (_: Throwable) {
+        0f
+    }
+
+    // ------------------------------------------------------------------ 系统侧帧率
+
+    /** SF dump 里游戏层那一行：`... requestedFrameRate: {30.00 Hz ...}` */
+    private val REQUESTED_RATE = Regex("requestedFrameRate: \\{\\s*([0-9.]+)\\s*Hz")
+
+    private var sfPkg = ""
+    private var sfRate = 0f
+    private var sfAt = 0L
+    private var sfBusy = false
+
+    /**
+     * 从系统侧读游戏声明的目标帧率，取不到返回 0。
+     *
+     * 这台 ROM 关掉了逐层帧时间戳：`dumpsys SurfaceFlinger --latency` 对游戏层、状态栏、
+     * 壁纸、甚至随手编的层名都只回一行刷新周期，没有任何帧时间戳；FrameTimeline 服务也不存在。
+     * 所以"实测 FPS"在系统侧根本不存在。系统里唯一跟游戏帧率有关的就是 SurfaceView 层的
+     * `requestedFrameRate` —— 游戏通过 ANativeWindow_setFrameRate 声明的目标帧率
+     * （实测终末地是 30Hz）。SF 全量 dump 约 80KB，4 秒刷一次，只在主线程之外读。
+     */
+    private fun systemFrameRate(ctx: Context): Float {
+        val pkg = GameInfoSource.foregroundPackage ?: return 0f
+        val uid = try {
+            ctx.packageManager.getApplicationInfo(pkg, 0).uid
+        } catch (_: Throwable) {
+            -1
+        }
+        val now = System.currentTimeMillis()
+        if (!sfBusy && (pkg != sfPkg || now - sfAt > 4_000L)) {
+            sfBusy = true
+            sfPkg = pkg
+            Thread {
+                val rate = readRequestedRate(pkg, uid)
+                main.post {
+                    sfBusy = false
+                    sfRate = rate
+                    sfAt = System.currentTimeMillis()
+                }
+            }.apply { isDaemon = true }.start()
+        }
+        return if (pkg == sfPkg) sfRate else 0f
+    }
+
+    /**
+     * 在 SF dump 里找该游戏 SurfaceView（BLAST）层，读它声明的帧率。
+     *
+     * SF 的层级树会把超长的层名截成 `com.hypergryph.e[...].u8.sdk.U8UnityContext`，
+     * 所以按完整包名匹配不成立；改按 uid 认（同一行末尾就是 `pid=... uid=...`），
+     * uid 拿不到时再退回包名前缀。
+     */
+    private fun readRequestedRate(pkg: String, uid: Int): Float {
+        val text = dumpSurfaceFlinger() ?: return 0f
+        val prefix = "SurfaceView[" + pkg.take(12)
+        for (line in text.lineSequence()) {
+            if (!line.contains("requestedFrameRate") || !line.contains("(BLAST)")) continue
+            if (uid >= 0) {
+                if (!line.contains("uid=$uid")) continue
+            } else if (!line.contains(prefix)) {
+                continue
+            }
+            val rate = REQUESTED_RATE.find(line)?.groupValues?.get(1)?.toFloatOrNull() ?: continue
+            if (rate >= 1f) {
+                android.util.Log.i("TapDockFps", "system frame rate for $pkg = $rate")
+                return rate
+            }
+        }
+        android.util.Log.w("TapDockFps", "no requestedFrameRate line for $pkg uid=$uid (dump ${text.length} chars)")
+        return 0f
+    }
+
+    /**
+     * 直接问 SurfaceFlinger 要状态。SystemUI 的 uid 实测持有 DUMP 和
+     * ACCESS_SURFACE_FLINGER，不用 root；binder 走不通再退回 exec。
+     */
+    private fun dumpSurfaceFlinger(): String? {
+        binderDump()?.takeIf { it.isNotBlank() }?.let { return it }
+        return execDumpsys()
+    }
+
+    private fun binderDump(): String? = try {
+        val sm = XposedHelpers.findClass("android.os.ServiceManager", null)
+        val binder = XposedHelpers.callStaticMethod(sm, "getService", "SurfaceFlinger") as? IBinder
+        if (binder == null) {
+            android.util.Log.w("TapDockFps", "SurfaceFlinger binder null")
+            null
+        } else {
+            val pipe = ParcelFileDescriptor.createPipe()
+            val read = pipe[0]
+            val write = pipe[1]
+            Thread {
+                try {
+                    binder.javaClass
+                        .getMethod(
+                            "dump", FileDescriptor::class.java, Array<String>::class.java
+                        )
+                        .apply { isAccessible = true }
+                        .invoke(binder, write.fileDescriptor, emptyArray<String>())
+                } catch (t: Throwable) {
+                    android.util.Log.w("TapDockFps", "binder dump call failed: $t")
+                } finally {
+                    runCatching { write.close() }
+                }
+            }.apply { isDaemon = true }.start()
+            // 正常 80KB 一秒内写完；万一 SF 卡住就关掉两端让读退出，别把 sfBusy 永久锁住
+            val watchdog = Thread {
+                try {
+                    Thread.sleep(3_000L)
+                } catch (_: Throwable) {
+                }
+                runCatching { write.close() }
+                runCatching { read.close() }
+            }.apply { isDaemon = true }
+            watchdog.start()
+            val text = StringBuilder()
+            val input = FileInputStream(read.fileDescriptor)
+            val buf = ByteArray(8192)
+            try {
+                while (true) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    text.append(String(buf, 0, n, Charsets.UTF_8))
+                }
+            } catch (t: Throwable) {
+                android.util.Log.w("TapDockFps", "binder pipe read failed: $t")
+            } finally {
+                runCatching { input.close() }
+                runCatching { read.close() }
+                runCatching { write.close() }
+                watchdog.interrupt()
+            }
+            val s = text.toString()
+            android.util.Log.i("TapDockFps", "binder dump ${s.length} chars")
+            s
+        }
+    } catch (t: Throwable) {
+        android.util.Log.w("TapDockFps", "binder dump failed: $t")
+        null
+    }
+
+    /** binder 不通时的兜底：SystemUI 的 uid 有 DUMP，但 exec 可能被 SELinux 域名挡 */
+    private fun execDumpsys(): String? = try {
+        val p = Runtime.getRuntime().exec(arrayOf("dumpsys", "SurfaceFlinger"))
+        val text = p.inputStream.bufferedReader().use { it.readText() }
+        runCatching { p.errorStream.close() }
+        runCatching { p.waitFor() }
+        android.util.Log.i("TapDockFps", "exec dump ${text.length} chars")
+        text
+    } catch (t: Throwable) {
+        android.util.Log.w("TapDockFps", "exec dump failed: $t")
+        null
     }
 
     private fun accentColor(ctx: Context): Int = try {

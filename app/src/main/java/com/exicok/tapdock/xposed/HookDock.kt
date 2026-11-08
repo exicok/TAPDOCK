@@ -101,6 +101,7 @@ object HookDock {
     const val EXTRA_SHADE_BG = "shade_bg"
     const val EXTRA_GAME_BUBBLE = "game_bubble"
     const val EXTRA_GAME_BUBBLE_DP = "game_bubble_dp"
+    const val EXTRA_UNLOCK_ROT = "unlock_rot"
     const val ALIGN_LEFT = "left"
     const val ALIGN_RIGHT = "right"
 
@@ -292,6 +293,9 @@ object HookDock {
     /** 游戏中叠加的悬浮图标开关与直径（同上，走三级通道） */
     private val overrideGameBubble = AtomicReference<Boolean?>(null)
     private val overrideGameBubbleDp = AtomicReference<Int?>(null)
+
+    /** 每次解锁关闭自动旋转的开关（同上，走三级通道） */
+    private val overrideUnlockRot = AtomicReference<Boolean?>(null)
 
     /** 上一次画在游戏 tile 上的 API 结论（包名 + 类型），换结论才 setImageDrawable */
     private var lastGameApi = ""
@@ -812,6 +816,11 @@ object HookDock {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context?, intent: Intent?) {
                 if (intent == null) return
+                // 每次解锁（用户在场）都把自动旋转关掉，见 disableAutoRotate
+                if (intent.action == Intent.ACTION_USER_PRESENT) {
+                    disableAutoRotate(c)
+                    return
+                }
                 if (intent.action == com.lsp102.tapdock.HookSync.HookActions.DOCK_QUERY) {
                     // App 首页要画预览：作废签名，让下一次 applyContent 必然回报一次
                     lastMirrorSig = ""
@@ -929,6 +938,9 @@ object HookDock {
                         )
                     )
                 }
+                if (intent.hasExtra(EXTRA_UNLOCK_ROT)) {
+                    overrideUnlockRot.set(intent.getBooleanExtra(EXTRA_UNLOCK_ROT, true))
+                }
                 main.post {
                     rebuildAll()
                     appContextRef?.get()?.let { syncGameBubble(it) }
@@ -936,6 +948,7 @@ object HookDock {
             }
         }
         val filter = IntentFilter(ACTION_RELOAD).apply {
+            addAction(Intent.ACTION_USER_PRESENT)
             addAction(SystemTiles.ACTION_CLICK)
             addAction(SystemTiles.ACTION_REFRESH)
             addAction(SystemTiles.ACTION_SNAPSHOT)
@@ -956,6 +969,32 @@ object HookDock {
             receiverRegistered = false
         }
         startTicker()
+    }
+
+    // ------------------------------------------------------------------ 解锁关闭自动旋转
+
+    /**
+     * 每次解锁都把自动旋转关掉。
+     *
+     * 直接在 SystemUI 进程里写系统设置：它的 uid 实测持有 WRITE_SETTINGS（granted=true），
+     * 不用 root、也不用叫醒模块 App。收的是 ACTION_USER_PRESENT，带密码/指纹/人脸解锁都会打这一拍。
+     */
+    private fun disableAutoRotate(ctx: Context?) {
+        val c = ctx ?: return
+        // 这个接收器在桌面进程里也注册着（Dock 也注入桌面任务栏），
+        // 写系统设置只交给 SystemUI：它有 WRITE_SETTINGS，桌面没有
+        if (c.packageName != "com.android.systemui") return
+        if (!unlockRotateOff()) return
+        try {
+            val ok = android.provider.Settings.System.putInt(
+                c.contentResolver,
+                android.provider.Settings.System.ACCELEROMETER_ROTATION,
+                0,
+            )
+            XposedBridge.log("[TapDock] unlocked: auto-rotate -> off (ok=$ok)")
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] disable auto-rotate failed: $t")
+        }
     }
 
     // ------------------------------------------------------------------ 状态图标事件源
@@ -1162,6 +1201,8 @@ object HookDock {
                         if (gbi >= 0) overrideGameBubble.set(c.getInt(gbi) == 1)
                         val gdi = c.getColumnIndex("gbubbledp")
                         if (gdi >= 0) overrideGameBubbleDp.set(c.getInt(gdi))
+                        val uri2 = c.getColumnIndex("unlockrot")
+                        if (uri2 >= 0) overrideUnlockRot.set(c.getInt(uri2) == 1)
                         if (ai >= 0) overrideAlignRight.set(c.getString(ai) != ALIGN_LEFT)
                         if (ci >= 0) overrideColor.set(c.getInt(ci))
                         if (oi >= 0) {
@@ -2027,6 +2068,10 @@ object HookDock {
     private fun gameBubbleDp(): Int = (overrideGameBubbleDp.get()
         ?: (loadPrefs()?.getInt("game_bubble_dp", com.lsp102.tapdock.DockPrefs.DEFAULT_GAME_BUBBLE_DP)
             ?: com.lsp102.tapdock.DockPrefs.DEFAULT_GAME_BUBBLE_DP)).coerceIn(32, 72)
+
+    /** 每次解锁关闭自动旋转（App 里的开关，默认开） */
+    private fun unlockRotateOff(): Boolean =
+        overrideUnlockRot.get() ?: (loadPrefs()?.getBoolean("unlock_rotate_off", true) ?: true)
 
     /**
      * 悬浮游戏图标只在 SystemUI 进程里挂：桌面进程的 ticker 也会跑前台游戏判定，

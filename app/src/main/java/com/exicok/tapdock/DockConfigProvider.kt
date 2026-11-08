@@ -48,6 +48,7 @@ class DockConfigProvider : ContentProvider() {
                     if (prefs.shadeBackground) 1 else 0,
                     if (prefs.gameBubble) 1 else 0,
                     prefs.gameBubbleDp,
+                    if (prefs.unlockRotateOff) 1 else 0,
                 )
             )
         }
@@ -98,7 +99,7 @@ class DockConfigProvider : ContentProvider() {
         val COLUMNS = arrayOf(
             "show", "align", "pcolor", "dl_pkgs", "card_order", "nyan", "album", "thumb", "cpu",
             "badge", "otp", "pkgon", "pkgcode", "ncard", "maxw", "game",
-            "apibadge", "shadeblur", "shadebg", "gbubble", "gbubbledp",
+            "apibadge", "shadeblur", "shadebg", "gbubble", "gbubbledp", "unlockrot",
         )
     }
 }

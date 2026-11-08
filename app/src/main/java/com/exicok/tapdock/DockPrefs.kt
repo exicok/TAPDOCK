@@ -155,6 +155,11 @@ class DockPrefs(context: Context) {
         get() = sp.getBoolean(KEY_SHADE_BG, true)
         set(v) = sp.edit().putBoolean(KEY_SHADE_BG, v).apply()
 
+    /** 每次解锁都关闭系统自动旋转（默认开） */
+    var unlockRotateOff: Boolean
+        get() = sp.getBoolean(KEY_UNLOCK_ROTATE_OFF, true)
+        set(v) = sp.edit().putBoolean(KEY_UNLOCK_ROTATE_OFF, v).apply()
+
     companion object {
         const val FILE = "dock_prefs"
 
@@ -192,5 +197,6 @@ class DockPrefs(context: Context) {
         private const val KEY_CPU_CHART = "cpu_chart"
         private const val KEY_SHADE_BLUR = "shade_blur_percent"
         private const val KEY_SHADE_BG = "shade_background"
+        private const val KEY_UNLOCK_ROTATE_OFF = "unlock_rotate_off"
     }
 }

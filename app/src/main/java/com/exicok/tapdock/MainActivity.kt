@@ -229,7 +229,7 @@ class MainActivity : AppCompatActivity() {
         footer()
     }
 
-    /** SystemUI 分类：下拉通知栏的模糊度与背景色 */
+    /** SystemUI 分类：下拉通知栏的模糊度、背景色，以及解锁时关自动旋转 */
     private fun systemUiTab() {
         sectionHeader(R.drawable.ic_tile_sys, R.string.sec_systemui)
         shadeBlurRow()
@@ -238,6 +238,13 @@ class MainActivity : AppCompatActivity() {
             prefs.shadeBackground,
         ) {
             prefs.shadeBackground = it
+            syncToHook()
+        }
+        switchRow(
+            R.drawable.ic_row_rotate, R.string.opt_unlock_rotate, R.string.sub_unlock_rotate,
+            prefs.unlockRotateOff,
+        ) {
+            prefs.unlockRotateOff = it
             syncToHook()
         }
     }

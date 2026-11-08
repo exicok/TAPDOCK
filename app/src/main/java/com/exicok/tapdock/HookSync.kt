@@ -41,6 +41,7 @@ object HookSync {
                     .putExtra(HookActions.EXTRA_SHADE_BG, prefs.shadeBackground)
                     .putExtra(HookActions.EXTRA_GAME_BUBBLE, prefs.gameBubble)
                     .putExtra(HookActions.EXTRA_GAME_BUBBLE_DP, prefs.gameBubbleDp)
+                    .putExtra(HookActions.EXTRA_UNLOCK_ROT, prefs.unlockRotateOff)
                 context.sendBroadcast(intent)
             } catch (_: Exception) {
             }
@@ -239,5 +240,8 @@ object HookSync {
         /** 游戏中叠加的悬浮图标：开关与直径（dp） */
         const val EXTRA_GAME_BUBBLE = "game_bubble"
         const val EXTRA_GAME_BUBBLE_DP = "game_bubble_dp"
+
+        /** 每次解锁关闭自动旋转 */
+        const val EXTRA_UNLOCK_ROT = "unlock_rot"
     }
 }
