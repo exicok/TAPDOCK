@@ -30,6 +30,13 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 旧版 tools 包已从 SDK 仓库移除，避免 sdkmanager 找不到包
+          packages: 'platform-tools'
+
+      - name: Install Android SDK platforms and build-tools
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
