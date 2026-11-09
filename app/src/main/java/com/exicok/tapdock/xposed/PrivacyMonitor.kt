@@ -175,6 +175,10 @@ object PrivacyMonitor {
         location = loc
         cameraPackages = camPkgs
         microphonePackages = micPkgs
+        XposedBridge.log(
+            "[TapDock] privacy cam=$cam mic=$mic loc=$loc types=" +
+                items.filterNotNull().mapNotNull { privacyTypeOf(it) }
+        )
     }
 
     /**

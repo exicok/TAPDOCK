@@ -155,6 +155,8 @@ object HookDock {
     /** 图标达到这个颗数就把进度条整条让开：胶囊再挤下去谁都没了 */
     private const val TRACK_OFF_ICONS = 4
     private const val POLL_MS = 3000L
+    /** 定位占用时定位图标的爆闪间隔：0.5 秒一档 */
+    private const val LOCATION_FLASH_MS = 500L
     private const val CLOCK_MS = 1000L
     private const val BADGE_COLOR = 0x40FFFFFF
 
@@ -178,6 +180,9 @@ object HookDock {
 
     /** iconRes 的第 0 格 */
     private const val WIFI_ICON = 0
+
+    /** iconRes 的第 2 格：定位 */
+    private const val LOCATION_ICON = 2
 
     /** iconRes 的末位：热点；连上的台数就写在这颗图标右边 */
     private const val HOTSPOT_ICON = 8
@@ -332,6 +337,10 @@ object HookDock {
     private var lastNyan = false
     private var lastPrivacyWarn = false
 
+    /** 定位占用时的爆闪相位：true = 图标显示，false = 图标隐藏 */
+    private var locationFlashOn = false
+    private var locationFlashing = false
+
     /** 底色：[lastBg] 是这一档要到的颜色，[bgShown] 是补间当前真实画出来的颜色 */
     private var lastBg = 0
     private var bgShown = 0
@@ -464,6 +473,49 @@ object HookDock {
      * 拿不到"正在被定位"，用开关态又会常年红。
      */
     private fun privacyWarn(): Boolean = PrivacyMonitor.camera || PrivacyMonitor.microphone
+
+    /**
+     * 定位占用期间让 Dock 上的定位图标持续爆闪：显示 / 隐藏每 [LOCATION_FLASH_MS] 切换一档，
+     * 直到定位结束。控制中心展开、来电横条期间不闪，避免干扰它们自己的布局。
+     */
+    private fun setLocationFlashActive(active: Boolean) {
+        if (active == locationFlashing) return
+        locationFlashing = active
+        XposedBridge.log("[TapDock] location flash active=$active")
+        main.removeCallbacks(locationFlashTick)
+        if (active) {
+            locationFlashOn = true
+            applyLocationFlash()
+            main.postDelayed(locationFlashTick, LOCATION_FLASH_MS)
+        } else {
+            locationFlashOn = false
+            applyLocationFlashAlpha(1f)
+        }
+    }
+
+    private val locationFlashTick = object : Runnable {
+        override fun run() {
+            if (!PrivacyMonitor.location || callKey.isNotEmpty() || panelOpen) {
+                locationFlashing = false
+                locationFlashOn = false
+                applyLocationFlashAlpha(1f)
+                return
+            }
+            locationFlashOn = !locationFlashOn
+            applyLocationFlash()
+            main.postDelayed(this, LOCATION_FLASH_MS)
+        }
+    }
+
+    private fun applyLocationFlash() {
+        applyLocationFlashAlpha(if (locationFlashOn) 1f else 0f)
+    }
+
+    private fun applyLocationFlashAlpha(alpha: Float) {
+        synchronized(bindings) {
+            bindings.forEach { b -> b.icons[LOCATION_ICON].alpha = alpha }
+        }
+    }
 
     /** 电量百分比，-1 = 还没读到过；由 watchBattery 的粘性广播喂 */
     @Volatile
@@ -1253,6 +1305,8 @@ object HookDock {
 
         // 来电横条：状态栏那条 Dock 铺满，其他内容让位；桌面任务栏保持原样
         if (callKey.isNotEmpty()) {
+            // 来电横条期间不闪定位图标
+            setLocationFlashActive(false)
             var any = false
             for (b in snapshot) {
                 if (isStatusBarBinding(b)) {
@@ -1268,6 +1322,8 @@ object HookDock {
         lastPanelOpen = panelOpen
 
         if (panelOpen) {
+            // 面板展开时 Dock 收成返回图标，不需要定位爆闪
+            setLocationFlashActive(false)
             // 控制中心展开中：Dock 收成一颗返回图标（点整条 Dock 仍然关面板）
             for (b in snapshot) {
                 b.back.visibility = View.VISIBLE
@@ -1325,6 +1381,8 @@ object HookDock {
             }
         }
         val warn = privacyWarn()
+        // 定位占用期间让定位图标持续爆闪，结束后停掉；摄像头/麦克风仍只静态转红
+        setLocationFlashActive(PrivacyMonitor.location)
         // 徽标一关，通知数就完全不参与 Dock 排版：不占位，也不压掉空档时的时钟
         val notifCount =
             if (notifBadge()) synchronized(activeNotifs) { activeNotifs.size } else 0
@@ -1335,7 +1393,7 @@ object HookDock {
         val privPkgs = privacyUsers()
         // 底色换档（隐私 / 低电）也是一次内容变化：不并进 changed 的话只有别的项变了才跟着刷
         val bg = dockBackgroundColor()
-        val bgTinted = bg != withAlpha(BG_COLOR_NORMAL)
+        val bgTinted = warn || batteryLevel in 0..BATT_WARN_LEVEL
         val changed = lastStates == null || !lastStates.contentEquals(states) ||
             warn != lastPrivacyWarn || notifCount != lastNotifCount || artShown != lastArtShown ||
             otpText != lastOtp || privPkgs != lastPrivPkgs || hsText != lastHs || bg != lastBg
