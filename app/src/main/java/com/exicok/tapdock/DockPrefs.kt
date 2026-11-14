@@ -160,6 +160,66 @@ class DockPrefs(context: Context) {
         get() = sp.getBoolean(KEY_UNLOCK_ROTATE_OFF, true)
         set(v) = sp.edit().putBoolean(KEY_UNLOCK_ROTATE_OFF, v).apply()
 
+    /**
+     * 用户手动标记为"游戏"的应用（默认空）。
+     *
+     * 自动判定只看两条：清单声明 GAME 分类、或启动 Activity 锁横屏。
+     * 有些游戏两条都不满足（竖屏小游戏、模拟器里的游戏），所以留一个手动清单兜底：
+     * 加进来的一律当游戏，Dock 的游戏图标、悬浮条、侧边栏都会跟着认。
+     */
+    var customGames: List<String>
+        get() {
+            val raw = sp.getString(KEY_CUSTOM_GAMES, "") ?: ""
+            return raw.split('|').filter { it.isNotBlank() }
+        }
+        set(v) = sp.edit().putString(KEY_CUSTOM_GAMES, v.joinToString("|")).apply()
+
+    /** 游戏画面顶部叠加 CPU / GPU / 内存读数（默认开） */
+    var gameHud: Boolean
+        get() = sp.getBoolean(KEY_GAME_HUD, true)
+        set(v) = sp.edit().putBoolean(KEY_GAME_HUD, v).apply()
+
+    /**
+     * 蓝牙耳机连上时，在屏幕底部浮出一张提示卡（默认开）。
+     * 只在竖屏出现，横屏一律不弹 —— 视频 / 游戏里不该被这块挡住。
+     */
+    var headsetCard: Boolean
+        get() = sp.getBoolean(KEY_HEADSET_CARD, true)
+        set(v) = sp.edit().putBoolean(KEY_HEADSET_CARD, v).apply()
+
+    /**
+     * 强制竖屏（默认关）。挂在 system_server 的方向总闸上，
+     * 只对 [forcePortraitApps] 名单内的应用生效 —— 游戏 / 视频这类必须横屏的
+     * 不加进名单就完全不受影响。
+     */
+    var forcePortrait: Boolean
+        get() = sp.getBoolean(KEY_FORCE_PORTRAIT, false)
+        set(v) = sp.edit().putBoolean(KEY_FORCE_PORTRAIT, v).apply()
+
+    /** 强制竖屏的包名名单（| 分隔，默认空 = 开关开了也没有应用被强制） */
+    var forcePortraitApps: List<String>
+        get() {
+            val raw = sp.getString(KEY_FORCE_PORTRAIT_APPS, "") ?: ""
+            return raw.split('|').filter { it.isNotBlank() }
+        }
+        set(v) = sp.edit().putString(KEY_FORCE_PORTRAIT_APPS, v.joinToString("|")).apply()
+
+    /**
+     * 桌面最近任务页优化（默认开）：
+     * 把「全部清除」按钮拉成卡片高度、胶囊钉回卡片左上角。仅竖屏参与，横屏零改动。
+     */
+    var recentsFix: Boolean
+        get() = sp.getBoolean(KEY_RECENTS_FIX, true)
+        set(v) = sp.edit().putBoolean(KEY_RECENTS_FIX, v).apply()
+
+    /**
+     * 游戏性能模式档位（默认 1 = 均衡）。
+     * 侧边栏一键切换；值是 [com.lsp102.tapdock.xposed.PerformanceMode.Level.id]。
+     */
+    var perfMode: Int
+        get() = sp.getInt(KEY_PERF_MODE, 1)
+        set(v) = sp.edit().putInt(KEY_PERF_MODE, v).apply()
+
     companion object {
         const val FILE = "dock_prefs"
 
@@ -189,6 +249,7 @@ class DockPrefs(context: Context) {
         /** 默认上限：状态栏里留出足够位置给左边的时钟 / 通知图标 */
         const val DEFAULT_DOCK_MAX_DP = 220
         const val DEFAULT_GAME_BUBBLE_DP = 44
+
         private const val KEY_GAME_BUBBLE = "game_bubble"
         private const val KEY_GAME_BUBBLE_DP = "game_bubble_dp"
         private const val KEY_NYAN_STYLE = "nyan_style"
@@ -198,5 +259,12 @@ class DockPrefs(context: Context) {
         private const val KEY_SHADE_BLUR = "shade_blur_percent"
         private const val KEY_SHADE_BG = "shade_background"
         private const val KEY_UNLOCK_ROTATE_OFF = "unlock_rotate_off"
+        private const val KEY_HEADSET_CARD = "headset_card"
+        private const val KEY_CUSTOM_GAMES = "custom_games"
+        private const val KEY_GAME_HUD = "game_hud"
+        private const val KEY_FORCE_PORTRAIT = "force_portrait"
+        private const val KEY_FORCE_PORTRAIT_APPS = "force_portrait_apps"
+        private const val KEY_RECENTS_FIX = "recents_fix"
+        private const val KEY_PERF_MODE = "perf_mode"
     }
 }

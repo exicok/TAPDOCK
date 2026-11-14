@@ -21,13 +21,38 @@ object SysStatSource {
     /** 一个包的进程读数：cpu = 占全部核心的百分比（没有基准帧时为 null），rss = kB */
     class App(val cpu: Int?, val rssKb: Long?)
 
+    /**
+     * 系统内存（整机视角，不是某个进程）。单位 kB。
+     *
+     * [totalKb] 来自 /proc/meminfo 的 MemTotal，[availKb] 是 MemAvailable ——
+     * 侧边栏那张大卡片要显示"已用 / 总量"，用 MemAvailable 算已用才和系统设置页对得上
+     * （MemFree 会把可回收的 page cache 当成不可用，数字会虚高）。
+     */
+    class Mem(val totalKb: Long, val availKb: Long) {
+        val usedKb: Long get() = (totalKb - availKb).coerceAtLeast(0L)
+        val fraction: Float get() = if (totalKb <= 0L) 0f else usedKb.toFloat() / totalKb
+    }
+
+    /** GPU 频率（MHz）：当前 / 上限。读不到就是 0 */
+    class GpuClock(val curMhz: Int, val maxMhz: Int)
+
     /** 一帧：每核 0..100（顺序 = cpu0..cpuN）、GPU%、zram、按包名的进程读数；空 / null = 这项没有 */
     class Frame(
         val cores: FloatArray,
         val gpu: Int?,
         val zram: Stat?,
         val apps: Map<String, App> = emptyMap(),
-    )
+        val mem: Mem? = null,
+        val gpuClock: GpuClock? = null,
+    ) {
+        /** 全核平均占用（0..100）；没有核心数据时为 null，调用方据此显示"--"而不是假的 0% */
+        val cpuAvg: Float?
+            get() = if (cores.isEmpty()) null else cores.average().toFloat()
+
+        /** 最高的那一核，用来在副标题里点出"最忙的核" */
+        val cpuPeak: Float?
+            get() = if (cores.isEmpty()) null else cores.max()
+    }
 
     private val EMPTY = Frame(FloatArray(0), null, null)
 
@@ -55,12 +80,149 @@ object SysStatSource {
     /** 采集端广播回来的一帧（prefs 在这台 ROM 上跨不过进程） */
     private val pushed = java.util.concurrent.atomic.AtomicReference("")
 
-    fun ingest(raw: String) {
+    /** 落盘 / 读盘的宿主上下文（SystemUI application context） */
+    private var appCtx: Context? = null
+
+    /**
+     * 采集端广播回来的一帧。
+     *
+     * 顺手落盘一份：SystemUI 进程被重启（模块生效、系统更新、低内存杀进程）后，
+     * 侧边栏再次打开时先用磁盘上这一帧把数值填出来，不必从 "--" 重新等 su 往返。
+     * 写的是 SystemUI 自己的私有目录，不涉及跨进程共享（这台 ROM 上 App 的 prefs 不落盘）。
+     */
+    fun ingest(context: Context?, raw: String) {
+        if (raw.isEmpty()) return
+        // 采集帧可能先于任何一次 poll 到达，这里补一次上下文，落盘才不会因为
+        // "还没人调用过 poll" 而静默跳过
+        if (appCtx == null && context != null) appCtx = context.applicationContext
         pushed.set(raw)
+        persist(raw)
+    }
+
+    /** 落盘用的轻量存储：只存原始串，解码逻辑始终只有一份 */
+    private const val STORE_FILE = "tapdock_sysstat.txt"
+
+    /**
+     * 两次落盘的最小间隔。这只是"最后一帧"的缓存，不必每秒都写：
+     * ingest 跑在 SystemUI 主线程的广播回调里，真正写盘挪去了后台线程，
+     * 这里的节流再把写盘频率压到 10 秒一次 —— 断电 / 被杀顶多丢最近 10 秒的缓存帧。
+     */
+    private const val PERSIST_MIN_MS = 10_000L
+
+    /** 落盘走后台线程，别占广播回调所在的主线程 */
+    private val persistExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "TapDockSysStat").apply { isDaemon = true }
+    }
+
+    @Volatile
+    private var lastPersistAt = 0L
+
+    /** 探测成功的落盘文件（null = 还没探过）；失败不缓存，下次再试 */
+    @Volatile
+    private var storeFileCache: java.io.File? = null
+
+    /**
+     * 落盘位置：优先用 SystemUI 自己的 files 目录；这台 ColorOS 上那个目录不存在
+     * （prefs 被重定向进了 apexdata），建不出来就退到 cache 目录。
+     * 目标是"SystemUI 进程重启后还能读到"，cache 满足这一点；被系统清掉也只是丢一次缓存。
+     */
+    private fun storeFile(context: Context): java.io.File? {
+        storeFileCache?.let { return it }
+        val ctx = context.applicationContext
+        val dirs = listOfNotNull(ctx.filesDir, ctx.cacheDir)
+        for (dir in dirs) {
+            try {
+                if (!dir.exists()) dir.mkdirs()
+                if (dir.isDirectory && dir.canWrite()) {
+                    val f = java.io.File(dir, STORE_FILE)
+                    storeFileCache = f
+                    return f
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        return null
+    }
+
+    /** 落盘结果只记一次，避免刷屏 */
+    private var persistLogged = false
+
+    private fun persist(raw: String) {
+        val ctx = appCtx ?: return
+        persistExecutor.execute {
+            try {
+                val now = System.currentTimeMillis()
+                if (now - lastPersistAt < PERSIST_MIN_MS) return@execute
+                val f = storeFile(ctx) ?: run {
+                    if (!persistLogged) {
+                        persistLogged = true
+                        de.robv.android.xposed.XposedBridge.log(
+                            "[TapDock] sysstat persist: no writable dir (filesDir/cacheDir)"
+                        )
+                    }
+                    return@execute
+                }
+                f.writeText(raw)
+                lastPersistAt = now
+                if (!persistLogged) {
+                    persistLogged = true
+                    de.robv.android.xposed.XposedBridge.log(
+                        "[TapDock] sysstat persist ok: ${f.absolutePath} (${raw.length}B)"
+                    )
+                }
+            } catch (t: Throwable) {
+                if (!persistLogged) {
+                    persistLogged = true
+                    de.robv.android.xposed.XposedBridge.log("[TapDock] sysstat persist failed: $t")
+                }
+            }
+        }
+    }
+
+    /**
+     * 启动时把上次落盘的一帧读回来。
+     *
+     * 只做"填数"，不做差分：CPU 的百分比需要两帧相减，所以 [Frame.cores] 这一格会是空的，
+     * 直到新的两帧到达；GPU / 内存这类瞬时值可以直接显示。
+     * 返回读到的旧帧（没有就是 null），由调用方决定怎么用。
+     */
+    fun restore(context: Context): Frame? {
+        appCtx = context.applicationContext
+        val raw = try {
+            storeFile(context)?.takeIf { it.isFile }?.readText()?.trim().orEmpty()
+        } catch (_: Throwable) {
+            ""
+        }
+        if (raw.isEmpty()) return null
+        val at = raw.substringBefore('|').toLongOrNull() ?: return null
+        lastAt = at
+        val f = decode(raw.substringAfter('|'))
+        // 差分基准不能跟着旧帧带进来：旧帧可能是几小时前采的，不清的话
+        // 第一条真实帧会把整个停机期平均进去，冒出一个假读数。
+        // 清掉让下一帧重新建基准，cores 多空一拍是正确行为。
+        prevBusy = null
+        prevTotal = null
+        prevAppTicks = emptyMap()
+        // 差分基准此时还不存在，cores 一定是空的；把瞬时值留下就够了
+        cached = f
+        lastRaw = raw
+        fresh = false
+        return f
     }
 
     /** 面板每秒 tick 调；内部按 ASK_MS 节流发采集请求。[apps] 是这一帧想顺带按进程读的包名 */
+    /**
+     * 每秒取一次当前帧。
+     *
+     * 取数失败或超时**不**清空 [cached]：侧边栏 / 面板关掉再打开、或者 su 偶发失败时，
+     * 先把上一次读到的数值继续显示出来，等新帧到了再就地覆盖。
+     * 只有 [reset] 会主动丢掉基准，供"不想把中间那段平均进来"的场景显式调用。
+     *
+     * [fresh] 标记这一帧是不是刚采到的：调用方据此决定要不要在标题上显示"等待采集"，
+     * 但数值本身始终给最后一次已知的。
+     */
     fun poll(context: Context, apps: List<String> = emptyList()): Frame {
+        if (appCtx == null) appCtx = context.applicationContext
         val now = System.currentTimeMillis()
         val cadence = if (warm) WARM_MS else ASK_MS
         if (now - askedAt >= cadence) {
@@ -68,14 +230,27 @@ object SysStatSource {
             HookSync.querySysStat(context, apps)
         }
         val raw = pushed.get()
-        val at = raw.substringBefore('|').toLongOrNull() ?: return EMPTY
-        if (now - at > STALE_MS) return EMPTY
+        if (raw.isEmpty()) return cached
+        val at = raw.substringBefore('|').toLongOrNull() ?: return cached
         if (raw != lastRaw) {
             lastRaw = raw
             cached = decode(raw.substringAfter('|'))
+            lastAt = at
         }
+        // 超过 STALE_MS 只标记"数据不新鲜"，仍然返回上一次读到的内容
+        fresh = now - lastAt <= STALE_MS
         return cached
     }
+
+    /** 上一帧的时间戳（ms），0 = 还没采到过 */
+    @Volatile
+    var lastAt = 0L
+        private set
+
+    /** 这一帧是否还在保鲜期内；false 表示数值是上一次的，界面上可以标注 */
+    @Volatile
+    var fresh = false
+        private set
 
     /** 重新打开面板时丢掉基准，免得把面板关着的那段时间平均进来 */
     fun reset() {
@@ -85,6 +260,7 @@ object SysStatSource {
         lastRaw = ""
         cached = EMPTY
         warm = true
+        fresh = false
         // 立刻允许下一次问：不等节流窗口，打开面板的第一帧就去采
         askedAt = 0L
     }
@@ -134,7 +310,34 @@ object SysStatSource {
                 if (u != null && t != null) Stat(u, t) else null
             } else null
         }
-        return Frame(cores, parts.getOrNull(2)?.toIntOrNull(), zram, apps(parts.getOrNull(3), prevT, nextT))
+        return Frame(
+            cores = cores,
+            gpu = parts.getOrNull(2)?.toIntOrNull(),
+            zram = zram,
+            apps = apps(parts.getOrNull(3), prevT, nextT),
+            mem = mem(parts.getOrNull(4)),
+            gpuClock = gpuClock(parts.getOrNull(5)),
+        )
+    }
+
+    /** 第 6 段 `总量,可用`（kB）→ 系统内存；两段缺一就不给，免得拿 0 算出一个 100% */
+    private fun mem(body: String?): Mem? {
+        if (body.isNullOrEmpty()) return null
+        val v = body.split(',')
+        if (v.size < 2) return null
+        val total = v[0].toLongOrNull() ?: return null
+        val avail = v[1].toLongOrNull() ?: return null
+        if (total <= 0L) return null
+        return Mem(total, avail)
+    }
+
+    /** 第 7 段 `当前MHz,上限MHz` → GPU 频率；全 0 就当读不到 */
+    private fun gpuClock(body: String?): GpuClock? {
+        if (body.isNullOrEmpty()) return null
+        val v = body.split(',')
+        val cur = v.getOrNull(0)?.toIntOrNull() ?: 0
+        val max = v.getOrNull(1)?.toIntOrNull() ?: 0
+        return if (cur <= 0 && max <= 0) null else GpuClock(cur, max)
     }
 
     /**

@@ -159,7 +159,23 @@ object GameInfoSource {
      * FULL_SENSOR / FULL_USER 那类不算：相机、视频 App 也全在里面，误判的代价是白跑 root 采集。
      * 清单里真声明了 GAME 分类的照旧直接认。
      */
+    /** 用户手动标记的游戏包名（| 分隔的串，来自 App 的配置） */
+    @Volatile
+    private var customRaw = ""
+
+    private fun customGames(): Set<String> =
+        customRaw.split('|').filter { it.isNotBlank() }.toSet()
+
+    /** 配置变化时调用；清单变了要把判定缓存清掉，否则刚加的游戏还得等缓存过期 */
+    fun setCustomGames(raw: String) {
+        if (raw == customRaw) return
+        customRaw = raw
+        gameCache.clear()
+    }
+
     private fun isGame(context: Context, pkg: String): Boolean {
+        // 手动清单优先：用户明确认定的就是游戏，不看清单声明也不看方向
+        if (pkg in customGames()) return true
         gameCache[pkg]?.let { return it }
         // 桌面本身常常锁横屏（这台机器的 droiddeck 桌面就是），别把它当成游戏，
         // 否则悬浮条会在桌面上也一直挂着

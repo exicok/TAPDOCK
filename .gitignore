@@ -10,3 +10,4 @@ local.properties
 .DS_Store
 captures/
 .verify/
+.box-agent-scratch/

@@ -16,13 +16,28 @@ object SysStatCollector {
 
     private const val TAG = "TapDockSysStat"
 
+    /**
+     * 一次 su 取回全部原子里程碑。
+     *
+     * 后两段（meminfo 的 MemTotal/MemAvailable、GPU 频率）是给侧边栏那张系统大卡片用的：
+     * 它要的是整机视角，不是某个进程的读数。
+     */
     private const val SCRIPT =
         "grep -E '^cpu[0-9]+' /proc/stat 2>/dev/null; " +
             "grep zram /proc/swaps 2>/dev/null; " +
-            "cat /sys/class/kgsl/kgsl-3d0/gpu_busy_percentage 2>/dev/null"
+            // 三个 GPU 节点都带标签回传（busy 输出形如 "16 %"，先归一成纯数字）。
+            // 带标签是为了防串位：哪台机器缺哪个节点，剩下的值也不会错填进别的槽
+            // （按出现顺序填槽时，busy 缺失会把频率当占用率显示成 "305%"）
+            "echo gpu_busy \$(cat /sys/class/kgsl/kgsl-3d0/gpu_busy_percentage 2>/dev/null | tr -dc '0-9'); " +
+            "grep -E '^(MemTotal|MemAvailable):' /proc/meminfo 2>/dev/null; " +
+            "echo gpu_clk \$(cat /sys/class/kgsl/kgsl-3d0/clock_mhz 2>/dev/null | tr -dc '0-9'); " +
+            "echo gpu_max \$(cat /sys/class/kgsl/kgsl-3d0/max_gpuclk 2>/dev/null | tr -dc '0-9')"
 
     /** 包名要拼进 su 的命令行，只放行正常包名字符，别把 shell 元字符带进去 */
     private val PKG_CHARS = Regex("^[A-Za-z0-9._:-]+$")
+
+    /** 按空白切列；提出来复用，别每行都 Pattern.compile 一遍 */
+    private val RE_WS = Regex("\\s+")
 
     /** 写进 pref 的一帧：`时间戳|busy,total;busy,total…|zram已用,zram容量|GPU%|pkg:ticks,rssKb;…`，缺的字段留空 */
     fun collect(context: Context, apps: List<String> = emptyList()): Boolean {
@@ -31,11 +46,15 @@ object SysStatCollector {
         val cores = ArrayList<String>(16)
         var zram = ""
         var gpu = ""
+        var gpuClockMhz = ""
+        var gpuMaxMhz = ""
+        var memTotalKb = ""
+        var memAvailKb = ""
         val cpuByPkg = HashMap<String, Long>()
         val rssByPkg = HashMap<String, Long>()
         var pkg: String? = null
         out.lineSequence().forEach { line ->
-            val cols = line.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            val cols = line.trim().split(RE_WS).filter { it.isNotEmpty() }
             when {
                 // 按进程读回的三行：APP 打头切当前包名，后面两行归它
                 cols.firstOrNull() == "APP" && cols.size >= 2 -> pkg = cols[1]
@@ -54,17 +73,31 @@ object SysStatCollector {
                 // /proc/swaps 数据行：Filename Type Size Used Priority，单位 kB
                 cols.size >= 5 && cols[0].contains("zram") ->
                     zram = "${cols[3]},${cols[2]}"
-                cols.isNotEmpty() && cols[0].all { it.isDigit() } && gpu.isEmpty() ->
-                    gpu = cols[0]
+                // /proc/meminfo：只认这两行，单位 kB
+                cols.size >= 2 && cols[0] == "MemTotal:" -> memTotalKb = cols[1]
+                cols.size >= 2 && cols[0] == "MemAvailable:" -> memAvailKb = cols[1]
+                // 三个 GPU 节点带标签回传（见 SCRIPT），按标签归位
+                cols.getOrNull(0) == "gpu_busy" && cols.size >= 2 -> gpu = cols[1]
+                cols.getOrNull(0) == "gpu_clk" && cols.size >= 2 -> gpuClockMhz = cols[1]
+                cols.getOrNull(0) == "gpu_max" && cols.size >= 2 -> {
+                    // max_gpuclk 给的是 900000000 这种 Hz 值，这里统一折成 MHz
+                    val raw = cols[1].toLongOrNull() ?: 0L
+                    gpuMaxMhz = (if (raw > 100_000L) raw / 1_000_000L else raw).toString()
+                }
             }
         }
         val appFrame = (cpuByPkg.keys + rssByPkg.keys).distinct().joinToString(";") { name ->
             "${name}:${cpuByPkg[name] ?: 0L},${rssByPkg[name] ?: 0L}"
         }
-        if (cores.isEmpty() && zram.isEmpty() && gpu.isEmpty() && appFrame.isEmpty()) return false
+        if (cores.isEmpty() && zram.isEmpty() && gpu.isEmpty() && appFrame.isEmpty() &&
+            memTotalKb.isEmpty()
+        ) {
+            return false
+        }
         HookSync.pushSysStat(
             context,
-            "${System.currentTimeMillis()}|${cores.joinToString(";")}|$zram|$gpu|$appFrame"
+            "${System.currentTimeMillis()}|${cores.joinToString(";")}|$zram|$gpu|$appFrame" +
+                "|$memTotalKb,$memAvailKb|$gpuClockMhz,$gpuMaxMhz"
         )
         return true
     }

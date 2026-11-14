@@ -91,6 +91,7 @@ class MainActivity : AppCompatActivity() {
             tab = when (item.itemId) {
                 R.id.tab_systemui -> TAB_SYSTEMUI
                 R.id.tab_game -> TAB_GAME
+                R.id.tab_desktop -> TAB_DESKTOP
                 R.id.tab_about -> TAB_ABOUT
                 else -> TAB_CENTER
             }
@@ -153,9 +154,13 @@ class MainActivity : AppCompatActivity() {
         previewLabel = null
         tvDlSub = null
         previewCard = null
+        // 顶部「卡片排序 / 选择器」两颗入口只属于控制中心：切到别的页就收起，避免误触
+        findViewById<View>(R.id.ll_pills).visibility =
+            if (tab == TAB_CENTER) View.VISIBLE else View.GONE
         when (tab) {
             TAB_SYSTEMUI -> systemUiTab()
             TAB_GAME -> gameTab()
+            TAB_DESKTOP -> desktopTab()
             TAB_ABOUT -> aboutTab()
             else -> centerTab()
         }
@@ -247,6 +252,25 @@ class MainActivity : AppCompatActivity() {
             prefs.unlockRotateOff = it
             syncToHook()
         }
+        switchRow(
+            R.drawable.ic_row_portrait, R.string.opt_force_portrait, R.string.sub_force_portrait,
+            prefs.forcePortrait,
+        ) {
+            prefs.forcePortrait = it
+            syncToHook()
+        }
+        actionRow(
+            R.drawable.ic_row_portrait, R.string.opt_force_portrait_apps, R.string.sub_force_portrait_apps,
+        ) {
+            startActivity(Intent(this, ForcePortraitPickerActivity::class.java))
+        }
+        switchRow(
+            R.drawable.ic_headset_notify, R.string.opt_headset_card, R.string.sub_headset_card,
+            prefs.headsetCard,
+        ) {
+            prefs.headsetCard = it
+            syncToHook()
+        }
     }
 
     /** 游戏分类：前台游戏时叠在画面上的悬浮图标 */
@@ -260,6 +284,18 @@ class MainActivity : AppCompatActivity() {
             syncToHook()
         }
         gameBubbleSizeRow()
+        switchRow(
+            R.drawable.ic_row_chart, R.string.opt_game_hud, R.string.sub_game_hud,
+            prefs.gameHud,
+        ) {
+            prefs.gameHud = it
+            syncToHook()
+        }
+        actionRow(
+            R.drawable.ic_tile_game, R.string.opt_custom_games, R.string.sub_custom_games,
+        ) {
+            startActivity(Intent(this, GamePickerActivity::class.java))
+        }
         val hint = TextView(this).apply {
             text = getString(R.string.game_hint)
             setTextAppearance(R.style.Text_Desc)
@@ -316,6 +352,21 @@ class MainActivity : AppCompatActivity() {
             }
         }
         extra.addView(slider)
+    }
+
+    /**
+     * 桌面分类：桌面（Launcher）进程侧的功能开关。
+     * 任务栏 Dock 的显示由控制中心页的「显示任务栏 Dock」总开关管，这里不再重复。
+     */
+    private fun desktopTab() {
+        sectionHeader(R.drawable.ic_nav_desktop, R.string.sec_desktop)
+        switchRow(
+            R.drawable.ic_nav_desktop, R.string.opt_recents_fix, R.string.sub_recents_fix,
+            prefs.recentsFix,
+        ) {
+            prefs.recentsFix = it
+            syncToHook()
+        }
     }
 
     /**
@@ -691,7 +742,8 @@ class MainActivity : AppCompatActivity() {
         private const val TAB_CENTER = 0
         private const val TAB_SYSTEMUI = 1
         private const val TAB_GAME = 2
-        private const val TAB_ABOUT = 3
+        private const val TAB_DESKTOP = 3
+        private const val TAB_ABOUT = 4
 
         /** 悬浮游戏图标直径档位（dp） */
         private val GAME_BUBBLE_SIZES = intArrayOf(36, 44, 52)

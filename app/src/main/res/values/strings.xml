@@ -17,6 +17,7 @@
     <string name="nav_center">控制中心</string>
     <string name="nav_systemui">SystemUI</string>
     <string name="nav_game">游戏</string>
+    <string name="nav_desktop">桌面</string>
     <string name="nav_about">关于</string>
 
     <string name="sec_game">游戏</string>
@@ -27,6 +28,11 @@
     <string name="bubble_size_small">小</string>
     <string name="bubble_size_standard">标准</string>
     <string name="bubble_size_large">大</string>
+    <string name="opt_game_hud">游戏顶部叠加 CPU / GPU / 内存</string>
+    <string name="sub_game_hud">前台运行游戏时，在屏幕顶部居中显示一条半透明读数条：CPU 全核平均、GPU 占用、内存占用；不拦截触摸，竖屏横屏都显示</string>
+    <string name="opt_custom_games">自定义游戏列表</string>
+    <string name="sub_custom_games">手动指定哪些应用算游戏：勾上的应用一律按游戏处理（Dock 游戏图标、悬浮侧边栏、采集都跟着认）。用于自动判定认不出的竖屏小游戏或模拟器</string>
+    <string name="game_pick_title">自定义游戏</string>
     <string name="game_hint">游戏判定依据：清单里声明为游戏，或启动 Activity 锁横屏（桌面除外）。悬浮条存在期间只会临时关闭左边缘的侧滑返回，切到其他应用或离开游戏后立即恢复。</string>
 
     <string name="sec_systemui">SystemUI</string>
@@ -37,8 +43,18 @@
     <string name="sub_shade_bg">关闭后下拉通知栏不再铺系统底色，只保留模糊与壁纸</string>
     <string name="opt_unlock_rotate">每次解锁关闭自动旋转</string>
     <string name="sub_unlock_rotate">解锁（密码 / 指纹 / 人脸）后自动关掉系统自动旋转；关闭此开关则不再干预</string>
+    <string name="opt_force_portrait">强制竖屏（名单）</string>
+    <string name="sub_force_portrait">名单内的应用一律强制竖屏：应用自己声明的横屏 / 传感器方向都会被改写。挂在系统框架层，需在 LSPosed 作用域里勾选"Android 系统"并重启系统后生效</string>
+    <string name="opt_force_portrait_apps">强制竖屏应用名单</string>
+    <string name="sub_force_portrait_apps">勾选哪些应用被强制竖屏；名单之外的应用（游戏 / 视频等）完全不受影响</string>
+    <string name="portrait_pick_title">强制竖屏应用</string>
+    <string name="opt_headset_card">耳机连接时底部提示卡</string>
+    <string name="sub_headset_card">蓝牙耳机连上后，屏幕底部浮出一张圆角卡片，显示设备名与电量；只弹 4 秒，点一下即收。横屏（视频 / 游戏）一律不显示</string>
 
     <string name="sec_about">关于</string>
+    <string name="sec_desktop">桌面</string>
+    <string name="opt_recents_fix">最近任务页优化</string>
+    <string name="sub_recents_fix">「全部清除」按钮对齐卡片高度，胶囊固定左上角（仅竖屏）</string>
     <string name="opt_libraries">开源引用库</string>
     <string name="sub_libraries">这个 APK 用到的第三方库和各自的许可证</string>
     <string name="libraries_title">开源引用库</string>

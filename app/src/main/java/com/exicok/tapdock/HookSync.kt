@@ -42,6 +42,9 @@ object HookSync {
                     .putExtra(HookActions.EXTRA_GAME_BUBBLE, prefs.gameBubble)
                     .putExtra(HookActions.EXTRA_GAME_BUBBLE_DP, prefs.gameBubbleDp)
                     .putExtra(HookActions.EXTRA_UNLOCK_ROT, prefs.unlockRotateOff)
+                    .putExtra(HookActions.EXTRA_HEADSET, prefs.headsetCard)
+                    .putExtra(HookActions.EXTRA_CUSTOM_GAMES, prefs.customGames.joinToString("|"))
+                    .putExtra(HookActions.EXTRA_GAME_HUD, prefs.gameHud)
                 context.sendBroadcast(intent)
             } catch (_: Exception) {
             }
@@ -243,5 +246,14 @@ object HookSync {
 
         /** 每次解锁关闭自动旋转 */
         const val EXTRA_UNLOCK_ROT = "unlock_rot"
+
+        /** 耳机连上时屏幕底部提示卡 */
+        const val EXTRA_HEADSET = "headset_card"
+
+        /** 用户手动标记为游戏的应用包名（| 分隔） */
+        const val EXTRA_CUSTOM_GAMES = "custom_games"
+
+        /** 游戏画面顶部叠加 CPU / GPU / 内存 */
+        const val EXTRA_GAME_HUD = "game_hud"
     }
 }

@@ -49,6 +49,12 @@ class DockConfigProvider : ContentProvider() {
                     if (prefs.gameBubble) 1 else 0,
                     prefs.gameBubbleDp,
                     if (prefs.unlockRotateOff) 1 else 0,
+                    if (prefs.headsetCard) 1 else 0,
+                    prefs.customGames.joinToString("|"),
+                    if (prefs.gameHud) 1 else 0,
+                    if (prefs.forcePortrait) 1 else 0,
+                    prefs.forcePortraitApps.joinToString("|"),
+                    if (prefs.recentsFix) 1 else 0,
                 )
             )
         }
@@ -64,6 +70,18 @@ class DockConfigProvider : ContentProvider() {
             val entries = SysCatalog.decode(raw)
             DockPrefs(context).sysCatalog = entries
             android.util.Log.i(TAG, "catalog stored: ${entries.size} blocks")
+            return Uri.parse("content://$AUTHORITY/$PATH_STATE")
+        }
+        // 侧边栏里关了"游戏顶部叠加"：写回 App 侧偏好，重启 / 下次进设置页看到的也是关
+        values?.getAsString(COLUMN_GAME_HUD)?.let { raw ->
+            DockPrefs(context).gameHud = raw == "1"
+            android.util.Log.i(TAG, "game hud stored: $raw")
+            return Uri.parse("content://$AUTHORITY/$PATH_STATE")
+        }
+        // 侧边栏里切了性能模式：把档位 id 写回 App 侧偏好
+        values?.getAsString(COLUMN_PERF_MODE)?.toIntOrNull()?.let { id ->
+            DockPrefs(context).perfMode = id
+            android.util.Log.i(TAG, "perf mode stored: $id")
             return Uri.parse("content://$AUTHORITY/$PATH_STATE")
         }
         // 面板上点了"已取"：把这条短信 _id 记进黑名单，取件码当场消失
@@ -94,12 +112,20 @@ class DockConfigProvider : ContentProvider() {
         /** SystemUI → App：这条取件码已经取过了（值是短信 _id） */
         const val COLUMN_PKG_DISMISSED = "pkg_dismissed"
 
+        /** SystemUI → App：侧边栏里切换了"游戏顶部叠加"（"1" / "0"） */
+        const val COLUMN_GAME_HUD = "gamehud_set"
+
+        /** SystemUI → App：侧边栏里切换了性能模式（值是档位 id 的十进制字符串） */
+        const val COLUMN_PERF_MODE = "perf_mode_set"
+
         private const val TAG = "TapDock"
 
         val COLUMNS = arrayOf(
             "show", "align", "pcolor", "dl_pkgs", "card_order", "nyan", "album", "thumb", "cpu",
             "badge", "otp", "pkgon", "pkgcode", "ncard", "maxw", "game",
-            "apibadge", "shadeblur", "shadebg", "gbubble", "gbubbledp", "unlockrot",
+            "apibadge", "shadeblur", "shadebg", "gbubble", "gbubbledp", "unlockrot", "headset", "customgames", "gamehud",
+            "forceportrait", "forceportraitapps",
+            "recentsfix",
         )
     }
 }

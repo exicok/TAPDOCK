@@ -12,9 +12,11 @@ import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentCallbacks
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.BitmapFactory
@@ -102,6 +104,9 @@ object HookDock {
     const val EXTRA_GAME_BUBBLE = "game_bubble"
     const val EXTRA_GAME_BUBBLE_DP = "game_bubble_dp"
     const val EXTRA_UNLOCK_ROT = "unlock_rot"
+    const val EXTRA_HEADSET = "headset_card"
+    const val EXTRA_CUSTOM_GAMES = "custom_games"
+    const val EXTRA_GAME_HUD = "game_hud"
     const val ALIGN_LEFT = "left"
     const val ALIGN_RIGHT = "right"
 
@@ -117,6 +122,10 @@ object HookDock {
     private const val CALL_BG = 0xE6000000.toInt()
     private const val CALL_ANSWER_COLOR = 0xFF2E7D32.toInt()
     private const val CALL_DECLINE_COLOR = 0xFFC62828.toInt()
+
+    /** 转屏后校正来电横条：最多重试几拍、每拍间隔 */
+    private const val CALL_FIT_TRIES = 8
+    private const val CALL_FIT_RETRY_MS = 60L
 
     /** Notification.Action 的语义值：ANSWER / DECLINE 是 @SystemApi，公开 SDK 里没有常量 */
     private const val SEMANTIC_ANSWER = 4
@@ -301,6 +310,15 @@ object HookDock {
 
     /** 每次解锁关闭自动旋转的开关（同上，走三级通道） */
     private val overrideUnlockRot = AtomicReference<Boolean?>(null)
+
+    /** 耳机连上时底部提示卡的开关（同上，走三级通道） */
+    private val overrideHeadset = AtomicReference<Boolean?>(null)
+
+    /** 游戏顶部叠加 CPU / GPU / 内存（同上） */
+    private val overrideGameHud = AtomicReference<Boolean?>(null)
+
+    /** 侧边栏本进程切换的性能档位 override；null = 未切过，用 App 侧的值 */
+    private val overridePerfMode = AtomicReference<Int?>(null)
 
     /** 上一次画在游戏 tile 上的 API 结论（包名 + 类型），换结论才 setImageDrawable */
     private var lastGameApi = ""
@@ -861,6 +879,10 @@ object HookDock {
         startNotificationWatch(appCtx)
         // 横幅接管：开机 / SystemUI 重启后按当前配置下一次全局开关
         syncHeadsUpSetting(appCtx)
+        // 耳机连上时的底部提示卡：接蓝牙广播 + 转屏回调
+        HeadsetCard.start(appCtx)
+        // 来电横条跟着转屏重排（见 relayoutCallBarForRotation）
+        watchRotation(appCtx)
         // 状态图标：接真实事件源，变化当帧刷新（轮询退化为兜底）
         startStateWatchers(appCtx)
         // 系统控制块：SystemUI 进程当引擎（建 / 点磁贴），桌面进程只缓存广播来的快照
@@ -881,7 +903,7 @@ object HookDock {
                 }
                 if (intent.action == com.lsp102.tapdock.HookSync.HookActions.SYSSTAT_STATE) {
                     intent.getStringExtra(com.lsp102.tapdock.HookSync.HookActions.EXTRA_SYSSTAT)
-                        ?.let { SysStatSource.ingest(it) }
+                        ?.let { SysStatSource.ingest(c, it) }
                     return
                 }
                 // 小窗卡片的画面：App 用 root 截一屏、按窗口矩形裁回来
@@ -993,9 +1015,24 @@ object HookDock {
                 if (intent.hasExtra(EXTRA_UNLOCK_ROT)) {
                     overrideUnlockRot.set(intent.getBooleanExtra(EXTRA_UNLOCK_ROT, true))
                 }
+                if (intent.hasExtra(EXTRA_GAME_HUD)) {
+                    overrideGameHud.set(intent.getBooleanExtra(EXTRA_GAME_HUD, true))
+                    appContextRef?.get()?.let { syncGameHud(it) }
+                }
+                if (intent.hasExtra(EXTRA_CUSTOM_GAMES)) {
+                    GameInfoSource.setCustomGames(intent.getStringExtra(EXTRA_CUSTOM_GAMES) ?: "")
+                }
+                if (intent.hasExtra(EXTRA_HEADSET)) {
+                    val on = intent.getBooleanExtra(EXTRA_HEADSET, true)
+                    overrideHeadset.set(on)
+                    if (!on) HeadsetCard.shutdown()
+                }
                 main.post {
                     rebuildAll()
-                    appContextRef?.get()?.let { syncGameBubble(it) }
+                    appContextRef?.get()?.let {
+                        syncGameBubble(it)
+                        syncGameHud(it)
+                    }
                 }
             }
         }
@@ -1021,6 +1058,38 @@ object HookDock {
             receiverRegistered = false
         }
         startTicker()
+    }
+
+    /**
+     * 转屏时重排来电横条。
+     *
+     * 横条的宽 / 高 / 贴边位移都是进模式那一刻按当时的屏算死的，转屏后必须重算，
+     * 否则横屏下会短一截、竖屏下会超出去，接听 / 挂断两半也不再平分屏幕。
+     */
+    private var rotationWatched = false
+
+    private val rotationCallbacks = object : ComponentCallbacks {
+        override fun onConfigurationChanged(newConfig: Configuration) {
+            if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE ||
+                newConfig.orientation == Configuration.ORIENTATION_PORTRAIT
+            ) {
+                main.post { relayoutCallBarForRotation() }
+            }
+        }
+
+        override fun onLowMemory() {}
+    }
+
+    private fun watchRotation(ctx: Context) {
+        if (rotationWatched) return
+        rotationWatched = true
+        try {
+            ctx.registerComponentCallbacks(rotationCallbacks)
+            XposedBridge.log("[TapDock] call bar rotation watcher started")
+        } catch (t: Throwable) {
+            rotationWatched = false
+            XposedBridge.log("[TapDock] call bar rotation watcher failed: $t")
+        }
     }
 
     // ------------------------------------------------------------------ 解锁关闭自动旋转
@@ -1190,6 +1259,9 @@ object HookDock {
                 appContextRef?.get()?.let {
                     GameInfoSource.refresh(it)
                     syncGameBubble(it)
+                    syncGameHud(it)
+                    // 兜底：万一转屏回调没派发到，横屏下这张底部卡片也不该留着
+                    HeadsetCard.guardOrientation(it)
                 }
                 applyContent()
                 // 引擎侧顺便刷新面板在用的系统磁贴（宿主侧这行是空操作）
@@ -1255,6 +1327,16 @@ object HookDock {
                         if (gdi >= 0) overrideGameBubbleDp.set(c.getInt(gdi))
                         val uri2 = c.getColumnIndex("unlockrot")
                         if (uri2 >= 0) overrideUnlockRot.set(c.getInt(uri2) == 1)
+                        val ghi = c.getColumnIndex("gamehud")
+                        if (ghi >= 0) overrideGameHud.set(c.getInt(ghi) == 1)
+                        val cgi = c.getColumnIndex("customgames")
+                        if (cgi >= 0) GameInfoSource.setCustomGames(c.getString(cgi) ?: "")
+                        val hci = c.getColumnIndex("headset")
+                        if (hci >= 0) {
+                            val on = c.getInt(hci) == 1
+                            overrideHeadset.set(on)
+                            if (!on) HeadsetCard.shutdown()
+                        }
                         if (ai >= 0) overrideAlignRight.set(c.getString(ai) != ALIGN_LEFT)
                         if (ci >= 0) overrideColor.set(c.getInt(ci))
                         if (oi >= 0) {
@@ -1705,34 +1787,8 @@ object HookDock {
                         }
                     }
                     if (added) {
-                        bar.post {
-                            val parent = bar.parent as? ViewGroup
-                            if (parent != null) {
-                                // 先把横条校正到屏幕原点，再整体挪到屏幕右外侧开始滑入
-                                bar.translationX = 0f
-                                val loc = IntArray(2)
-                                bar.getLocationOnScreen(loc)
-                                val baseX = -loc[0].toFloat()
-                                bar.translationY -= loc[1].toFloat()
-                                bar.setTag(CALL_BASE_X_TAG, baseX)
-                                bar.translationX = baseX + w
-                                bar.alpha = 1f
-                                callBarAnim?.cancel()
-                                val anim = ValueAnimator.ofFloat(baseX + w, baseX)
-                                anim.duration = 300L
-                                anim.interpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
-                                anim.addUpdateListener {
-                                    bar.translationX = it.animatedValue as Float
-                                }
-                                callBarAnim = anim
-                                anim.start()
-                                XposedBridge.log(
-                                    "[TapDock] call bar slide-in from right: " +
-                                        "host=${parent.javaClass.simpleName} w=${parent.width} " +
-                                        "barW=${bar.width} baseX=$baseX"
-                                )
-                            }
-                        }
+                        val h = barH
+                        bar.post { if (fitCallBar(bar, h)) slideInCallBar(bar, w) }
                     }
                 } else {
                     bar.alpha = 1f
@@ -1772,6 +1828,98 @@ object HookDock {
             setDockWidth(b, ViewGroup.LayoutParams.WRAP_CONTENT)
             restoreParentInsets(b)
         }
+    }
+
+    /**
+     * 把横条校正到"屏幕上沿、整屏宽"：转屏后窗口宽度、状态栏高度、父容器的内缩都会变，
+     * 所以这个动作每次进横条模式、以及每次转屏都要重做一遍。
+     *
+     * 返回 false = 横条还没挂到窗口上（拿不到父布局或尺寸），调用方别急着播动画。
+     */
+    private fun fitCallBar(bar: View, barH: Int): Boolean {
+        val parent = bar.parent as? ViewGroup ?: return false
+        // 宽度以真实显示宽度为准。转屏瞬间 bar.resources 可能还是旧配置，
+        // 所以先看窗口根有没有按新宽度 layout 过，没有就用显示尺寸兜底
+        val dm = bar.resources.displayMetrics
+        val screenW = maxOf(dm.widthPixels, parent.width).takeIf { it > 0 } ?: return false
+        val h = if (barH > 0) barH else statusBarHeightPx(bar.context)
+        val lp = bar.layoutParams
+        if (lp != null && (lp.width != screenW || lp.height != h)) {
+            lp.width = screenW
+            lp.height = h
+            bar.layoutParams = lp
+        }
+        // 先把之前那笔贴边位移清掉，重新量当前位置
+        bar.translationX = 0f
+        bar.translationY = 0f
+        val loc = IntArray(2)
+        bar.getLocationOnScreen(loc)
+        // 用"当前位置到屏幕原点"的差量把横条顶到 (0,0)，这个值就是后续滑入 / 滑出的基准
+        bar.translationX = -loc[0].toFloat()
+        bar.translationY = -loc[1].toFloat()
+        bar.setTag(CALL_BASE_X_TAG, bar.translationX)
+        XposedBridge.log(
+            "[TapDock] call bar fit: parentW=${parent.width} screenW=$screenW " +
+                "barH=$h baseX=${bar.translationX}"
+        )
+        return true
+    }
+
+    /** 从屏幕右外侧滑到 [fitCallBar] 校正好的位置 */
+    private fun slideInCallBar(bar: View, screenWidth: Int) {
+        val baseX = bar.getTag(CALL_BASE_X_TAG) as? Float ?: 0f
+        bar.alpha = 1f
+        callBarAnim?.cancel()
+        val anim = ValueAnimator.ofFloat(baseX + screenWidth, baseX)
+        anim.duration = 300L
+        anim.interpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
+        anim.addUpdateListener { bar.translationX = it.animatedValue as Float }
+        callBarAnim = anim
+        anim.start()
+    }
+
+    /**
+     * 转屏时重排来电横条。
+     *
+     * 进来电模式时横条的宽、高和贴边位移都是按当时那块屏算死的，转屏后全都失效：
+     * 宽度还是旧屏宽（横屏时会短一截、竖屏时会超出去），位移也还停在旧原点。
+     * 这里按新屏幕重算一遍，并让左右两半按钮重新平分。
+     */
+    private fun relayoutCallBarForRotation() {
+        if (callKey.isEmpty() || callExiting) return
+        val snapshot = synchronized(bindings) { bindings.toList() }
+        for (b in snapshot) {
+            if (!isStatusBarBinding(b)) continue
+            val bar = findCallBar(b) ?: continue
+            if (bar.visibility != View.VISIBLE) continue
+            callBarAnim?.cancel()
+            val statusBar = statusBarRoot(b)
+            scheduleFitCallBar(bar, statusBar, 0)
+        }
+        XposedBridge.log("[TapDock] call bar relayout for rotation")
+    }
+
+    /**
+     * 转屏后按新尺寸校正横条，必要时重试几拍。
+     *
+     * 转屏是异步的：ComponentCallbacks 到的时候，窗口根和状态栏往往还停在旧尺寸上，
+     * 这一帧量出来的是旧值。所以每拍都校验"横条宽度是否已经等于当前屏宽"，
+     * 对不上就再等一帧，最多 [CALL_FIT_TRIES] 次。
+     */
+    private fun scheduleFitCallBar(bar: View, statusBar: ViewGroup?, attempt: Int) {
+        bar.postDelayed({
+            if (callKey.isEmpty() || callExiting) return@postDelayed
+            val barH = statusBar?.height?.takeIf { it > 0 } ?: statusBarHeightPx(bar.context)
+            fitCallBar(bar, barH)
+            bar.alpha = 1f
+            // 校验：横条父容器的宽度应该已经跟上新方向
+            val parentW = (bar.parent as? ViewGroup)?.width ?: 0
+            val screenW = bar.resources.displayMetrics.widthPixels
+            val ok = parentW >= screenW || attempt >= CALL_FIT_TRIES
+            if (!ok) {
+                scheduleFitCallBar(bar, statusBar, attempt + 1)
+            }
+        }, if (attempt == 0) 0L else CALL_FIT_RETRY_MS)
     }
 
     /** 系统状态栏高度（px），拿不到时退回 24dp */
@@ -2122,6 +2270,64 @@ object HookDock {
     private fun gameBubbleOn(): Boolean =
         overrideGameBubble.get() ?: (loadPrefs()?.getBoolean("game_bubble", true) ?: true)
 
+    /** 游戏顶部状态条开关（App 里的开关，默认开） */
+    internal fun gameHudOn(): Boolean =
+        overrideGameHud.get() ?: (loadPrefs()?.getBoolean("game_hud", true) ?: true)
+
+    /**
+     * 侧边栏里切换"游戏顶部叠加"。
+     *
+     * 三件事一起做：
+     *  1. 立刻改本进程的 override，这一拍就生效（不用等 3 秒轮询）
+     *  2. 写回 App 侧偏好，重启 / 下次打开设置页仍是这个值
+     *  3. 立刻按新值同步一次窗口
+     */
+    internal fun setGameHud(context: Context, on: Boolean) {
+        overrideGameHud.set(on)
+        try {
+            val values = android.content.ContentValues()
+            values.put(
+                com.lsp102.tapdock.DockConfigProvider.COLUMN_GAME_HUD,
+                if (on) "1" else "0",
+            )
+            context.applicationContext.contentResolver.insert(
+                com.lsp102.tapdock.DockConfigProvider.CONTENT_URI, values
+            )
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] game hud persist failed: $t")
+        }
+        syncGameHud(context)
+        XposedBridge.log("[TapDock] game hud -> $on (from sidebar)")
+    }
+
+    /** 当前性能档位 id：侧边栏本进程切过就用它的值，否则回落到 App 侧偏好 */
+    internal fun perfModeId(): Int =
+        overridePerfMode.get() ?: (loadPrefs()?.getInt("perf_mode", 1) ?: 1)
+
+    /**
+     * 侧边栏里切换性能档位。
+     *
+     * 三件事一起做：本进程 override 立刻生效、写回 App 侧偏好、用 root 真正切调频策略。
+     * 调频是尽力而为（节点缺 / 没权限就跳过），但档位本身一定记下来。
+     */
+    internal fun setPerfMode(context: Context, id: Int) {
+        overridePerfMode.set(id)
+        try {
+            val values = android.content.ContentValues()
+            values.put(
+                com.lsp102.tapdock.DockConfigProvider.COLUMN_PERF_MODE, id.toString()
+            )
+            context.applicationContext.contentResolver.insert(
+                com.lsp102.tapdock.DockConfigProvider.CONTENT_URI, values
+            )
+        } catch (t: Throwable) {
+            XposedBridge.log("[TapDock] perf mode persist failed: $t")
+        }
+        val level = com.lsp102.tapdock.xposed.PerformanceMode.fromId(id)
+        com.lsp102.tapdock.xposed.PerformanceMode.apply(context, level)
+        XposedBridge.log("[TapDock] perf mode -> ${level.label} (from sidebar)")
+    }
+
     /** 悬浮游戏图标直径（dp，App 里的档位） */
     private fun gameBubbleDp(): Int = (overrideGameBubbleDp.get()
         ?: (loadPrefs()?.getInt("game_bubble_dp", com.lsp102.tapdock.DockPrefs.DEFAULT_GAME_BUBBLE_DP)
@@ -2140,6 +2346,14 @@ object HookDock {
             context.applicationContext,
             gameBubbleOn() && GameInfoSource.gameForeground,
             gameBubbleDp(),
+        )
+    }
+
+    /** 游戏顶部 CPU / GPU / 内存状态条：和悬浮条同一拍决定挂不挂 */
+    private fun syncGameHud(context: Context) {
+        GameHud.sync(
+            context.applicationContext,
+            gameHudOn() && GameInfoSource.gameForeground,
         )
     }
 
@@ -2234,6 +2448,8 @@ object HookDock {
                     if (!isGroupSummary(sbn)) {
                         synchronized(activeNotifs) { activeNotifs.add(keyOf(sbn)) }
                     }
+                    // 侧边栏要的是能读的内容，不只是个数
+                    appContextRef?.get()?.let { NotifCenter.onPosted(it, sbn) }
                     handleDownloadNotification(sbn)
                     // 横幅接管：原生横幅已经被整批关掉，够格弹的那几条改画成 Dock 下方的卡片。
                     // 双参重载会带 RankingMap（系统算好的重要度），单参调用时 args[1] 取不到就是 null
@@ -2259,6 +2475,7 @@ object HookDock {
                     val key = keyOf(sbn)
                     if (key == callKey) endCallMode()
                     synchronized(activeNotifs) { activeNotifs.remove(key) }
+                    NotifCenter.onRemoved(key)
                     synchronized(downloadMap) { downloadMap.remove(sbn.packageName) }
                     // 验证码不在这里清：短信应用常常两三秒就把通知 cancel 掉，
                     // 码得在 Dock 上撑满 OtpSource.TTL_MS 那 10 秒才够抄
@@ -2335,6 +2552,9 @@ object HookDock {
                 activeNotifs.clear()
                 activeNotifs.addAll(keys)
             }
+            // 侧边栏那一路也灌一次全量内容
+            val all = arr.filterIsInstance<StatusBarNotification>().toTypedArray()
+            appContextRef?.get()?.let { NotifCenter.seed(it, all) }
             XposedBridge.log("[TapDock] notification count seeded: ${keys.size}")
             main.post { applyContent() }
         } catch (t: Throwable) {
@@ -2449,6 +2669,8 @@ object HookDock {
         if (open) {
             // 面板要占住屏幕顶部，通知卡片先让开
             NotificationCard.onPanelOpen()
+            // 耳机提示卡贴屏幕底部，同样不该浮在整屏面板上
+            HeadsetCard.onPanelOpen()
         }
         if (!open) {
             // 面板收起：队列里憋着的下一条补上
@@ -2461,6 +2683,13 @@ object HookDock {
 
     /** 控制中心此刻是否展开（通知卡片用它决定要不要憋着） */
     internal fun panelOpenNow(): Boolean = panelOpen
+
+    /** 给同进程的悬浮卡片（耳机连接提示）取宿主上下文 */
+    internal fun appContextOrNull(): Context? = appContextRef?.get()
+
+    /** 耳机连上时底部弹提示卡（App 里的开关，默认开） */
+    internal fun headsetCardOn(): Boolean =
+        overrideHeadset.get() ?: (loadPrefs()?.getBoolean("headset_card", true) ?: true)
 
     /** 当前注入的 Dock 根视图；横竖屏重建面板时拿它当锚点 */
     internal fun dockRootView(): View? =
