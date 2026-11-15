@@ -233,23 +233,56 @@ object GameSidebar {
      * 原来这里是「设备状态」+ 机型两行、左侧还有一个系统图标；这些都在面板里重复了
      * 使用者已经知道的信息，删掉之后整块面板从顶部就开始是数据。
      */
+    /**
+     * 顶栏：右侧一个明确的「关闭」按钮。
+     *
+     * 原来只放了一个浅灰的 `×` 字符，在纯黑面板里几乎看不见，而且点击区只有 32dp。
+     * 现在做成一颗带底色的胶囊按钮：`×` + "关闭" 文字，白字、有底色、点击区更大。
+     */
     private fun header(ctx: Context): LinearLayout {
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
         }
-        row.addView(
+        val close = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(ctx, 10), dp(ctx, 7), dp(ctx, 10), dp(ctx, 7))
+            background = GradientDrawable().apply {
+                setColor(MINI_CARD_BG)
+                cornerRadius = dp(ctx, 14).toFloat()
+            }
+            isClickable = true
+            setOnClickListener { dismiss() }
+        }
+        close.addView(
             TextView(ctx).apply {
                 text = "×"
-                setTextColor(TEXT_DIM)
-                textSize = 20f
+                setTextColor(TEXT_MAIN)
+                textSize = 17f
+                includeFontPadding = false
                 gravity = Gravity.CENTER
-                isClickable = true
-                setOnClickListener { dismiss() }
             },
-            LinearLayout.LayoutParams(dp(ctx, 32), dp(ctx, 32)).apply {
-                gravity = Gravity.END
-            }
+            LinearLayout.LayoutParams(dp(ctx, 14), dp(ctx, 18))
+        )
+        close.addView(
+            TextView(ctx).apply {
+                text = "关闭"
+                setTextColor(TEXT_MAIN)
+                textSize = 11.5f
+                includeFontPadding = false
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginStart = dp(ctx, 5) }
+        )
+        row.addView(
+            close,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { gravity = Gravity.END }
         )
         return row
     }
@@ -290,9 +323,6 @@ object GameSidebar {
 
         // ---- 顶部叠加开关
         hudToggle(ctx, parent)
-
-        // ---- 性能模式
-        perfSection(ctx, parent)
 
         // ---- 通知
         notifSection(ctx, parent)
@@ -419,106 +449,7 @@ object GameSidebar {
         parent.addView(row, matchWrap().apply { topMargin = dp(ctx, 10) })
     }
 
-    /**
-     * 性能模式区：四档胶囊横排 —— 省电 / 均衡 / 性能 / 极速。
-     *
-     * 点档位三件事一起做：本进程 override、写回 App 偏好、root 切调频策略。
-     * 调频节点因机而异，写不动就跳过（日志可查），但选中的档位始终高亮并记住。
-     */
-    private fun perfSection(ctx: Context, parent: LinearLayout) {
-        val card = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(ctx, 12), dp(ctx, 11), dp(ctx, 12), dp(ctx, 12))
-            background = GradientDrawable().apply {
-                setColor(BIG_CARD_BG)
-                cornerRadius = dp(ctx, 16).toFloat()
-            }
-        }
-        val title = TextView(ctx).apply {
-            text = "性能模式"
-            setTextColor(TEXT_MAIN)
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            includeFontPadding = false
-        }
-        card.addView(title, matchWrap())
 
-        // 两行两列的四档：窄条里横排四颗会太挤，2×2 更稳
-        val levels = PerformanceMode.all()
-        val grid = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            isBaselineAligned = false
-        }
-        val chips = mutableMapOf<PerformanceMode.Level, TextView>()
-        for (rowIdx in levels.indices step 2) {
-            val row = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                isBaselineAligned = false
-            }
-            for (colIdx in rowIdx until min(rowIdx + 2, levels.size)) {
-                val lv = levels[colIdx]
-                val chip = TextView(ctx).apply {
-                    text = lv.label
-                    textSize = 11f
-                    gravity = Gravity.CENTER
-                    includeFontPadding = false
-                    isClickable = true
-                }
-                chips[lv] = chip
-                row.addView(
-                    chip,
-                    LinearLayout.LayoutParams(0, dp(ctx, 32), 1f).apply {
-                        if (colIdx > rowIdx) marginStart = dp(ctx, 6)
-                    }
-                )
-            }
-            grid.addView(row, matchWrap().apply { topMargin = if (rowIdx == 0) dp(ctx, 8) else dp(ctx, 6) })
-        }
-        card.addView(grid, matchWrap())
-
-        // 副标题提示当前档位的说明，也告知调频可能不支持
-        val hint = TextView(ctx).apply {
-            textSize = 9f
-            includeFontPadding = false
-            maxLines = 2
-            ellipsize = TextUtils.TruncateAt.END
-        }
-        card.addView(hint, matchWrap().apply { topMargin = dp(ctx, 8) })
-
-        fun paintSelected() {
-            val cur = PerformanceMode.fromId(HookDock.perfModeId())
-            chips.forEach { (lv, chip) ->
-                val on = lv == cur
-                chip.background = GradientDrawable().apply {
-                    setColor(if (on) accentAlpha(0x66) else MINI_CARD_BG)
-                    cornerRadius = dp(ctx, 10).toFloat()
-                    if (on) setStroke(dp(ctx, 1), accent) else setStroke(0, accent)
-                }
-                chip.setTextColor(if (on) TEXT_MAIN else TEXT_DIM)
-            }
-            hint.text = "${cur.label} · ${cur.desc}（调频需 root，部分机型节点不同可能只部分生效）"
-            hint.setTextColor(TEXT_DIM)
-        }
-        paintSelected()
-
-        chips.forEach { (lv, chip) ->
-            chip.setOnClickListener {
-                if (lv.id == HookDock.perfModeId()) return@setOnClickListener
-                HookDock.setPerfMode(ctx, lv.id)
-                paintSelected()
-            }
-        }
-
-        parent.addView(card, matchWrap().apply { topMargin = dp(ctx, 10) })
-    }
-
-    /**
-     * 通知区块：把当前挂着的通知列成竖排小卡。
-     *
-     * 数据来自 [NotifCenter]（跟 Dock 徽标同一条通知管线，只是那边只数个数）。
-     * 最多铺 [NOTIF_MAX_ROWS] 条，再多折叠成一行"还有 N 条"，免得侧边栏被通知撑到滚不到底。
-     * 常驻通知排在后面并加一个"常驻"标记 —— 它们不会自己消失，混在消息里容易误读。
-     */
     private fun notifSection(ctx: Context, parent: LinearLayout) {
         val box = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
