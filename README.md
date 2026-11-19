@@ -1,6 +1,6 @@
 # TapDock — LSPosed 纯模块 · 基础任务栏 Dock
 
-一个**纯 LSPosed（Xposed）模块**：通过 hook SystemUI / 桌面进程，往屏幕顶部任务栏
+一个**纯 LSPosed（Xposed）模块**：通过 hook SystemUI，往屏幕顶部任务栏
 （系统状态栏）的**布局内部**注入一个**黑色圆角的 Dock 条**——不是悬浮窗，而是任务栏
 自身的一部分。
 

@@ -35,7 +35,12 @@ object SystemBlur {
             "android.view.SyncRtSurfaceTransactionApplier\$SurfaceParams\$Builder"
         ).getConstructor(SurfaceControl::class.java).newInstance(sc)
         builder.require("withMergeTransaction", transaction)
-        builder.require("withBackgroundBlurRadius", radiusPx)
+        // 半径 setter 在 16 QPR1 起改名（withBackgroundBlur → withBackgroundBlurRadius，
+        // 签名和 FLAG_BACKGROUND_BLUR_RADIUS 都没变）。只认新名字会在 Android 12~16.0 上
+        // 抛 NoSuchMethodException，而它抛在 scheduleApply 之前 —— 上面那笔带 setBlurRegions 的
+        // 事务永远发不出去，整片窗口级模糊会静默丢失，所以两个名字都要试。
+        builder.requireAny(arrayOf("withBackgroundBlurRadius", "withBackgroundBlur"), radiusPx)
+        // 只有改名后的版本才有 scale / opaque，老版本没有是正常的，缺了不影响模糊
         builder.call("withBackgroundBlurScale", 1f)
         builder.call("withOpaque", false)
         val params = builder.require("build") ?: return false
@@ -119,5 +124,17 @@ object SystemBlur {
         val m = javaClass.methods.firstOrNull { it.name == name && it.parameterCount == args.size }
             ?: throw NoSuchMethodException("$name with ${args.size} args")
         return m.invoke(this, *args)
+    }
+
+    /**
+     * 同一个 API 在不同 Android 版本改过名字，按 [names] 里的顺序逐个找，
+     * 一个都没有才抛 —— 早抛会把后面 scheduleApply 那步（真正的下发）一起带没了。
+     */
+    private fun Any.requireAny(names: Array<out String>, vararg args: Any?): Any? {
+        for (name in names) {
+            val m = javaClass.methods.firstOrNull { it.name == name && it.parameterCount == args.size }
+            if (m != null) return m.invoke(this, *args)
+        }
+        throw NoSuchMethodException("${names.joinToString(" / ")} with ${args.size} args")
     }
 }

@@ -4,7 +4,7 @@
 
     <string name="xposed_desc">AOSP 任务栏 Dock（基础版）：往系统状态栏/任务栏布局里注入一个黑色圆角 Dock 条，可靠左/靠右，可重启 SystemUI</string>
 
-    <string name="main_hook_desc">在 LSPosed 管理器中启用本模块，作用域勾选「系统界面 (SystemUI)」与「桌面 (Launcher)」。改动任何设置后，点右下角按钮重启 SystemUI 立即生效。</string>
+    <string name="main_hook_desc">在 LSPosed 管理器中启用本模块，作用域勾选「系统界面 (SystemUI)」；使用强制竖屏时再勾「Android 系统」并重启系统。改动任何设置后，点右下角按钮重启 SystemUI 立即生效。</string>
     <string name="main_hook_switch">显示任务栏 Dock</string>
     <string name="main_hook_active">已注入 ✓</string>
     <string name="main_hook_inactive">未注入（启用模块并重启 SystemUI 后生效）</string>
@@ -17,7 +17,6 @@
     <string name="nav_center">控制中心</string>
     <string name="nav_systemui">SystemUI</string>
     <string name="nav_game">游戏</string>
-    <string name="nav_desktop">桌面</string>
     <string name="nav_about">关于</string>
 
     <string name="sec_game">游戏</string>
@@ -52,9 +51,6 @@
     <string name="sub_headset_card">蓝牙耳机连上后，屏幕底部浮出一张圆角卡片，显示设备名与电量；只弹 4 秒，点一下即收。横屏（视频 / 游戏）一律不显示</string>
 
     <string name="sec_about">关于</string>
-    <string name="sec_desktop">桌面</string>
-    <string name="opt_recents_fix">最近任务页优化</string>
-    <string name="sub_recents_fix">「全部清除」按钮对齐卡片高度，胶囊固定左上角（仅竖屏）</string>
     <string name="opt_libraries">开源引用库</string>
     <string name="sub_libraries">这个 APK 用到的第三方库和各自的许可证</string>
     <string name="libraries_title">开源引用库</string>

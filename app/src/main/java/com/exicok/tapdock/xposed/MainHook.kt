@@ -17,14 +17,6 @@ class MainHook : IXposedHookLoadPackage {
                 FreeformCaptionHook.hook(lpparam.classLoader)
             }
 
-            // 12L 任务栏（运行在桌面进程）
-            "com.android.launcher3",
-            "com.google.android.apps.nexuslauncher",
-            -> {
-                TaskbarHook.hook(lpparam.classLoader)
-                RecentsLayoutHook.hook(lpparam.classLoader)
-            }
-
             // system_server（LSPosed 作用域里的"Android 系统"）：全应用强制竖屏的名单闸门
             "android" -> ForcePortraitHook.hook(lpparam.classLoader)
         }

@@ -7,7 +7,7 @@ import android.database.MatrixCursor
 import android.net.Uri
 
 /**
- * 向 Hook 侧（SystemUI / 桌面进程）暴露当前配置。
+ * 向 Hook 侧（SystemUI 进程）暴露当前配置。
  * Hook 侧通过 contentResolver 定时轮询此 Provider，
  * 即使 LSPosed 的 XSharedPreferences 共享失效、广播丢失，设置也必然生效。
  */
@@ -54,7 +54,6 @@ class DockConfigProvider : ContentProvider() {
                     if (prefs.gameHud) 1 else 0,
                     if (prefs.forcePortrait) 1 else 0,
                     prefs.forcePortraitApps.joinToString("|"),
-                    if (prefs.recentsFix) 1 else 0,
                 )
             )
         }
@@ -125,7 +124,6 @@ class DockConfigProvider : ContentProvider() {
             "badge", "otp", "pkgon", "pkgcode", "ncard", "maxw", "game",
             "apibadge", "shadeblur", "shadebg", "gbubble", "gbubbledp", "unlockrot", "headset", "customgames", "gamehud",
             "forceportrait", "forceportraitapps",
-            "recentsfix",
         )
     }
 }

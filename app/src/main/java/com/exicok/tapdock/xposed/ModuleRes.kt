@@ -6,7 +6,7 @@ import de.robv.android.xposed.XposedBridge
 import java.lang.ref.WeakReference
 
 /**
- * 模块资源加载器：Hook 代码运行在 SystemUI / 桌面进程里，
+ * 模块资源加载器：Hook 代码运行在 SystemUI 进程里，
  * 直接用 R 常量 setImageResource/getString 会到宿主进程的资源表解析（必然失败）。
  * 必须通过 createPackageContext 拿到模块自己的资源上下文再加载。
  */

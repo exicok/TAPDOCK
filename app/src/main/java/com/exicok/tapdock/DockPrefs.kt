@@ -4,7 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 
 /**
- * TapDock 基础版配置：Hook 侧（SystemUI / 桌面进程）通过 LSPosed 的
+ * TapDock 基础版配置：Hook 侧（SystemUI 进程）通过 LSPosed 的
  * New XSharedPreferences 机制读取同一个文件（dock_prefs）。
  */
 class DockPrefs(context: Context) {
@@ -205,14 +205,6 @@ class DockPrefs(context: Context) {
         set(v) = sp.edit().putString(KEY_FORCE_PORTRAIT_APPS, v.joinToString("|")).apply()
 
     /**
-     * 桌面最近任务页优化（默认开）：
-     * 把「全部清除」按钮拉成卡片高度、胶囊钉回卡片左上角。仅竖屏参与，横屏零改动。
-     */
-    var recentsFix: Boolean
-        get() = sp.getBoolean(KEY_RECENTS_FIX, true)
-        set(v) = sp.edit().putBoolean(KEY_RECENTS_FIX, v).apply()
-
-    /**
      * 游戏性能模式档位（默认 1 = 均衡）。
      * 侧边栏一键切换；值是 [com.lsp102.tapdock.xposed.PerformanceMode.Level.id]。
      */
@@ -264,7 +256,6 @@ class DockPrefs(context: Context) {
         private const val KEY_GAME_HUD = "game_hud"
         private const val KEY_FORCE_PORTRAIT = "force_portrait"
         private const val KEY_FORCE_PORTRAIT_APPS = "force_portrait_apps"
-        private const val KEY_RECENTS_FIX = "recents_fix"
         private const val KEY_PERF_MODE = "perf_mode"
     }
 }

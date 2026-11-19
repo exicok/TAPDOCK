@@ -91,7 +91,6 @@ class MainActivity : AppCompatActivity() {
             tab = when (item.itemId) {
                 R.id.tab_systemui -> TAB_SYSTEMUI
                 R.id.tab_game -> TAB_GAME
-                R.id.tab_desktop -> TAB_DESKTOP
                 R.id.tab_about -> TAB_ABOUT
                 else -> TAB_CENTER
             }
@@ -160,7 +159,6 @@ class MainActivity : AppCompatActivity() {
         when (tab) {
             TAB_SYSTEMUI -> systemUiTab()
             TAB_GAME -> gameTab()
-            TAB_DESKTOP -> desktopTab()
             TAB_ABOUT -> aboutTab()
             else -> centerTab()
         }
@@ -355,23 +353,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 桌面分类：桌面（Launcher）进程侧的功能开关。
-     * 任务栏 Dock 的显示由控制中心页的「显示任务栏 Dock」总开关管，这里不再重复。
-     */
-    private fun desktopTab() {
-        sectionHeader(R.drawable.ic_nav_desktop, R.string.sec_desktop)
-        switchRow(
-            R.drawable.ic_nav_desktop, R.string.opt_recents_fix, R.string.sub_recents_fix,
-            prefs.recentsFix,
-        ) {
-            prefs.recentsFix = it
-            syncToHook()
-        }
-    }
-
-    /**
      * 关于分类：目前只有引用库一个入口，以后加更新日志、反馈也放这儿。
-     * 底部三分类导航的第三项（res/menu/bottom_nav.xml 的 tab_about）。
+     * 底部导航的最后一项（res/menu/bottom_nav.xml 的 tab_about）。
      */
     private fun aboutTab() {
         sectionHeader(R.drawable.ic_nav_about, R.string.sec_about)
@@ -742,7 +725,6 @@ class MainActivity : AppCompatActivity() {
         private const val TAB_CENTER = 0
         private const val TAB_SYSTEMUI = 1
         private const val TAB_GAME = 2
-        private const val TAB_DESKTOP = 3
         private const val TAB_ABOUT = 4
 
         /** 悬浮游戏图标直径档位（dp） */

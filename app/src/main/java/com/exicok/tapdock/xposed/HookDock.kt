@@ -885,7 +885,7 @@ object HookDock {
         watchRotation(appCtx)
         // 状态图标：接真实事件源，变化当帧刷新（轮询退化为兜底）
         startStateWatchers(appCtx)
-        // 系统控制块：SystemUI 进程当引擎（建 / 点磁贴），桌面进程只缓存广播来的快照
+        // 系统控制块：SystemUI 进程当引擎（建 / 点磁贴）
         SystemTiles.attach(appCtx, appCtx.packageName == "com.android.systemui")
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context?, intent: Intent?) {
@@ -1102,8 +1102,7 @@ object HookDock {
      */
     private fun disableAutoRotate(ctx: Context?) {
         val c = ctx ?: return
-        // 这个接收器在桌面进程里也注册着（Dock 也注入桌面任务栏），
-        // 写系统设置只交给 SystemUI：它有 WRITE_SETTINGS，桌面没有
+        // 只有 SystemUI 有 WRITE_SETTINGS，写系统设置这一拍只认它
         if (c.packageName != "com.android.systemui") return
         if (!unlockRotateOff()) return
         try {
@@ -1385,7 +1384,7 @@ object HookDock {
             return
         }
 
-        // 来电横条：状态栏那条 Dock 铺满，其他内容让位；桌面任务栏保持原样
+        // 来电横条：状态栏那条 Dock 铺满，其他内容让位
         if (callKey.isNotEmpty()) {
             // 来电横条期间不闪定位图标
             setLocationFlashActive(false)
@@ -1572,7 +1571,7 @@ object HookDock {
 
     // ------------------------------------------------------------------ 来电横条
 
-    /** 只有状态栏里的 Dock 进来电横条模式；桌面任务栏维持原样 */
+    /** 只有状态栏里的 Dock 进来电横条模式 */
     private fun isStatusBarBinding(b: Binding): Boolean =
         b.root.context.packageName == "com.android.systemui"
 
@@ -2338,8 +2337,8 @@ object HookDock {
         overrideUnlockRot.get() ?: (loadPrefs()?.getBoolean("unlock_rotate_off", true) ?: true)
 
     /**
-     * 悬浮游戏图标只在 SystemUI 进程里挂：桌面进程的 ticker 也会跑前台游戏判定，
-     * 跟着挂就是第二颗图标压在同一处。进出游戏、开关、尺寸都由这一拍决定。
+     * 悬浮游戏图标只在 SystemUI 进程里挂，
+     * 进出游戏、开关、尺寸都由这一拍决定。
      */
     private fun syncGameBubble(context: Context) {
         GameBubble.sync(

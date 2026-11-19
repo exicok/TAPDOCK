@@ -3,7 +3,7 @@ package com.lsp102.tapdock
 import android.content.Context
 import android.content.Intent
 
-/** App 侧 → Hook 侧（SystemUI / 桌面进程）的实时配置同步 */
+/** App 侧 → Hook 侧（SystemUI 进程）的实时配置同步 */
 object HookSync {
 
     /** 模块自己的包名：Hook 侧要指名道姓地发给它 */
@@ -16,8 +16,6 @@ object HookSync {
     fun notify(context: Context, prefs: DockPrefs) {
         for (pkg in listOf(
             "com.android.systemui",
-            "com.android.launcher3",
-            "com.google.android.apps.nexuslauncher",
         )) {
             try {
                 val intent = Intent(HookActions.RELOAD)
@@ -56,7 +54,7 @@ object HookSync {
      * 只有 SystemUI 能创建 / 绑定这些磁贴，App 自己查不到内置磁贴的标签。
      */
     fun requestCatalog(context: Context) {
-        for (pkg in listOf("com.android.systemui", "com.android.launcher3")) {
+        for (pkg in listOf("com.android.systemui")) {
             try {
                 context.sendBroadcast(
                     Intent(HookActions.SYS_REFRESH).setPackage(pkg)
@@ -160,8 +158,6 @@ object HookSync {
     fun pushPackageCode(context: Context, raw: String) {
         for (pkg in listOf(
             "com.android.systemui",
-            "com.android.launcher3",
-            "com.google.android.apps.nexuslauncher",
         )) {
             try {
                 context.sendBroadcast(

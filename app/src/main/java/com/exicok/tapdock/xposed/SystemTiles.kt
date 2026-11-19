@@ -17,8 +17,8 @@ import de.robv.android.xposed.XposedHelpers
 import java.util.concurrent.Executors
 
 /**
- * 系统控制块（QS 磁贴）代理。磁贴对象只存在于 SystemUI 进程，面板却可能挂在桌面进程，
- * 所以引擎侧（SystemUI）建磁贴 / 点击 / 读状态并广播快照，宿主侧只缓存快照、把点击转成广播。
+ * 系统控制块（QS 磁贴）代理：磁贴对象只存在于 SystemUI 进程，建磁贴 / 点击 / 读状态
+ * 都在引擎侧完成，状态快照走广播分发，面板侧只缓存快照、把点击转成广播。
  *
  * 反射名取自这颗 ROM 的 SystemUI dex（LineageOS 23.2 / Android 16 BP4A）。
  */
@@ -232,7 +232,7 @@ object SystemTiles {
         }
     }
 
-    /** 引擎把整份快照广播给两个宿主进程；布尔用 "1"/"0" 混在 String[] 里，省掉自造分隔符 */
+    /** 引擎把整份快照广播给宿主进程；布尔用 "1"/"0" 混在 String[] 里，省掉自造分隔符 */
     private fun publishAll() {
         val ctx = appCtx ?: return
         val list = snapshots.values.toList()
@@ -309,7 +309,5 @@ object SystemTiles {
 
     private val HOSTS = listOf(
         "com.android.systemui",
-        "com.android.launcher3",
-        "com.google.android.apps.nexuslauncher",
     )
 }
