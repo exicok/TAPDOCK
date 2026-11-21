@@ -54,6 +54,25 @@
     <string name="opt_libraries">开源引用库</string>
     <string name="sub_libraries">这个 APK 用到的第三方库和各自的许可证</string>
     <string name="libraries_title">开源引用库</string>
+    <string name="opt_check_update">检查更新</string>
+    <string name="sub_check_update">点一下立即检查</string>
+    <string name="opt_update_auto">启动时自动检查更新</string>
+    <string name="sub_update_auto" formatted="false">每次打开设置页在后台查一次 GitHub Releases，只在新版本时提示</string>
+    <string name="update_checking">正在向 GitHub 查询最新版本…</string>
+    <string name="update_latest">已是最新</string>
+    <string name="update_current">当前 %1$s</string>
+    <string name="update_new_fmt">可更新到 %1$s</string>
+    <string name="update_failed_fmt">检查失败：%1$s</string>
+    <string name="update_no_release">仓库还没有发布正式版</string>
+    <string name="update_dialog_title_fmt">发现新版本 %1$s</string>
+    <string name="update_dialog_empty">这一版没有填写更新说明。</string>
+    <string name="update_download">下载 APK</string>
+    <string name="update_open_release">打开发布页</string>
+    <string name="update_new_tag_toast">已发现新版本 %1$s</string>
+    <string name="update_latest_toast">已是最新版本（%1$s）</string>
+    <string name="opt_repo">项目主页</string>
+    <string name="sub_repo">github.com/exicok/TAPDOCK · 源码、发布页与问题反馈</string>
+    <string name="update_browser_missing">这台机器上没有能打开链接的应用</string>
     <string name="libraries_intro">直接依赖这几项，许可证一律 Apache License 2.0；传递依赖也都是 AndroidX / JetBrains 的组件，同属 Apache 2.0。Xposed API 只在编译期参与，APK 里不含它的字节码，运行时由 LSPosed 注入。点任意一行看许可证要点。</string>
     <string name="lib_sub_fmt">%1$s · %2$s</string>
     <string name="lib_sub_compileonly_fmt">%1$s · %2$s（仅编译期）</string>

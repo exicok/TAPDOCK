@@ -9,6 +9,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -20,6 +21,7 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.bottomnavigation.BottomNavigationView
@@ -45,6 +47,14 @@ class MainActivity : AppCompatActivity() {
 
     /** 只在「Dock」分类下存在，回来时刷新文案 */
     private var tvDlSub: TextView? = null
+
+    /** 关于页的更新检测：结果缓存在这几个字段里，切页回来直接复用，不重复请求 */
+    private var tvUpdateSub: TextView? = null
+    private var tvUpdateTrail: TextView? = null
+    private var checking = false
+    private var lastNoRelease = false
+    private var lastError: String? = null
+    private var updatePending: UpdateChecker.Release? = null
 
     private val pcolorViews = mutableListOf<View>()
     private var previewCard: View? = null
@@ -152,6 +162,8 @@ class MainActivity : AppCompatActivity() {
         pcolorViews.clear()
         previewLabel = null
         tvDlSub = null
+        tvUpdateSub = null
+        tvUpdateTrail = null
         previewCard = null
         // 顶部「卡片排序 / 选择器」两颗入口只属于控制中心：切到别的页就收起，避免误触
         findViewById<View>(R.id.ll_pills).visibility =
@@ -353,13 +365,183 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 关于分类：目前只有引用库一个入口，以后加更新日志、反馈也放这儿。
+     * 关于分类：版本与更新检测、引用库、项目主页。
      * 底部导航的最后一项（res/menu/bottom_nav.xml 的 tab_about）。
      */
     private fun aboutTab() {
         sectionHeader(R.drawable.ic_nav_about, R.string.sec_about)
+        updateRow()
+        switchRow(
+            R.drawable.ic_row_update, R.string.opt_update_auto, R.string.sub_update_auto,
+            prefs.autoCheckUpdate,
+        ) {
+            prefs.autoCheckUpdate = it
+            if (it) autoCheckUpdate()
+        }
         actionRow(R.drawable.ic_lib, R.string.opt_libraries, R.string.sub_libraries) {
             startActivity(Intent(this, LibrariesActivity::class.java))
+        }
+        actionRow(R.drawable.ic_nav_about, R.string.opt_repo, R.string.sub_repo) {
+            openUrl(UpdateChecker.REPO_URL)
+        }
+        if (prefs.autoCheckUpdate) autoCheckUpdate()
+    }
+
+    /**
+     * 更新检测行：副标题就是检测结果，整行可点 = 立即重查。
+     * 查到新版本时行尾给一个版本号，点行先弹更新说明，再给下载 / 发布页两个出口。
+     */
+    private fun updateRow() {
+        val v = row(
+            R.drawable.ic_row_update,
+            getString(R.string.opt_check_update),
+            updateSub(),
+        )
+        v.findViewById<View>(R.id.iv_chevron).visibility = View.VISIBLE
+        tvUpdateSub = v.findViewById(R.id.tv_sub)
+        tvUpdateTrail = v.findViewById<TextView>(R.id.tv_trail).apply {
+            pendingLabel()?.let {
+                visibility = View.VISIBLE
+                text = it
+            }
+        }
+        v.setOnClickListener {
+            if (checking) return@setOnClickListener
+            val found = updatePending
+            if (found != null) showUpdateDialog(found) else startUpdateCheck(manual = true)
+        }
+    }
+
+    private fun updateSub(): String {
+        val current = getString(R.string.update_current, appVersion())
+        val pending = updatePending
+        // 结论持久化在 prefs.latestTag：重启 App 后也说得清上次查到哪一版。
+        // 但 tag 比当前版本新时仍然要说「可更新」，不能因为丢了 Release 对象就谎报已是最新。
+        val tag = prefs.latestTag
+        return when {
+            checking -> "$current · " + getString(R.string.update_checking)
+            lastError != null -> "$current · " + getString(R.string.update_failed_fmt, lastError!!)
+            lastNoRelease -> "$current · " + getString(R.string.update_no_release)
+            pending != null -> "$current · " + getString(R.string.update_new_fmt, UpdateChecker.tagLabel(pending.tag))
+            tag.isNotEmpty() && UpdateChecker.isNewer(tag, appVersion()) ->
+                "$current · " + getString(R.string.update_new_fmt, UpdateChecker.tagLabel(tag))
+            tag.isNotEmpty() -> "$current · " + getString(R.string.update_latest)
+            else -> getString(R.string.sub_check_update)
+        }
+    }
+
+    /** 行尾版本号：查到新版本才亮，其余情况收起 */
+    private fun pendingLabel(): String? {
+        updatePending?.let { return UpdateChecker.tagLabel(it.tag) }
+        val tag = prefs.latestTag
+        if (tag.isNotEmpty() && UpdateChecker.isNewer(tag, appVersion())) return UpdateChecker.tagLabel(tag)
+        return null
+    }
+
+    /**
+     * 自动检查：只在距上次检查超过 [AUTO_CHECK_INTERVAL_MS] 时发请求，
+     * 失败不打扰、没有新版本也不提示 —— 每次开页都弹东西没人受得了，
+     * 也不至于把未鉴权的 GitHub 额度（每小时 60 次）随手耗光。
+     */
+    private fun autoCheckUpdate() {
+        if (checking) return
+        val now = System.currentTimeMillis()
+        // 距上次检查太近：不再发请求；上次的结论会由 updateSub() 从 prefs 里读出来
+        if (now - prefs.lastCheckAt < AUTO_CHECK_INTERVAL_MS) return
+        startUpdateCheck(manual = false)
+    }
+
+    /** 网络请求放子线程，回来再按当前分类决定要不要重画这一行 */
+    private fun startUpdateCheck(manual: Boolean) {
+        if (checking) return
+        checking = true
+        lastError = null
+        lastNoRelease = false
+        refreshUpdateViews()
+        Thread {
+            val result = UpdateChecker.fetch()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                checking = false
+                // 只有真的问到结果才记时间：失败后下次进页立刻重试，不用干等半小时
+                if (result !is UpdateChecker.Result.Failed) {
+                    prefs.lastCheckAt = System.currentTimeMillis()
+                }
+                when (result) {
+                    is UpdateChecker.Result.Found -> {
+                        val r = result.release
+                        prefs.latestTag = r.tag
+                        updatePending = if (UpdateChecker.isNewer(r.tag, appVersion())) r else null
+                        if (updatePending != null) {
+                            val fresh = prefs.lastSeenUpdate != r.tag
+                            prefs.lastSeenUpdate = r.tag
+                            if (fresh) {
+                                Toast.makeText(
+                                    this,
+                                    getString(R.string.update_new_tag_toast, UpdateChecker.tagLabel(r.tag)),
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                        } else if (manual) {
+                            Toast.makeText(
+                                this,
+                                getString(R.string.update_latest_toast, appVersion()),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    }
+                    is UpdateChecker.Result.NoRelease -> {
+                        lastNoRelease = true
+                        prefs.latestTag = ""
+                    }
+                    is UpdateChecker.Result.Failed -> lastError = result.message
+                }
+                refreshUpdateViews()
+            }
+        }.start()
+    }
+
+    /** 结果只改文案和行尾版本，不整体重画：重画会把滚动位置顶回去 */
+    private fun refreshUpdateViews() {
+        tvUpdateSub?.text = updateSub()
+        tvUpdateTrail?.apply {
+            val label = if (checking) null else pendingLabel()
+            if (label != null) {
+                visibility = View.VISIBLE
+                text = label
+            } else {
+                visibility = View.GONE
+            }
+        }
+    }
+
+    private fun showUpdateDialog(r: UpdateChecker.Release) {
+        val body = r.notes.ifBlank { getString(R.string.update_dialog_empty) }
+        val apk = r.apkUrl
+        val builder = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.update_dialog_title_fmt, UpdateChecker.tagLabel(r.tag)))
+            .setMessage(body)
+            .setNegativeButton(android.R.string.cancel, null)
+        if (apk != null) {
+            builder.setPositiveButton(R.string.update_download) { _, _ -> openUrl(apk) }
+            builder.setNeutralButton(R.string.update_open_release) { _, _ -> openUrl(r.pageUrl) }
+        } else {
+            builder.setPositiveButton(R.string.update_open_release) { _, _ -> openUrl(r.pageUrl) }
+        }
+        builder.show()
+    }
+
+    private fun appVersion(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+    } catch (_: Exception) {
+        ""
+    }
+
+    private fun openUrl(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: Exception) {
+            Toast.makeText(this, R.string.update_browser_missing, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -722,6 +904,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        /** 自动检查的最短间隔：半小时内切回来不重复请求 */
+        private const val AUTO_CHECK_INTERVAL_MS = 30 * 60 * 1000L
+
         private const val TAB_CENTER = 0
         private const val TAB_SYSTEMUI = 1
         private const val TAB_GAME = 2

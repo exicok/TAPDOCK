@@ -212,6 +212,26 @@ class DockPrefs(context: Context) {
         get() = sp.getInt(KEY_PERF_MODE, 1)
         set(v) = sp.edit().putInt(KEY_PERF_MODE, v).apply()
 
+    /** 打开设置页时自动去 GitHub Releases 查一次（默认开） */
+    var autoCheckUpdate: Boolean
+        get() = sp.getBoolean(KEY_AUTO_CHECK_UPDATE, true)
+        set(v) = sp.edit().putBoolean(KEY_AUTO_CHECK_UPDATE, v).apply()
+
+    /** 上次检查的时间戳（毫秒），限制自动检查的最短间隔 */
+    var lastCheckAt: Long
+        get() = sp.getLong(KEY_LAST_CHECK_AT, 0L)
+        set(v) = sp.edit().putLong(KEY_LAST_CHECK_AT, v).apply()
+
+    /** 上次检查到的最新版本 tag：跨进程也能显示「已是最新」，不用立刻再发请求 */
+    var latestTag: String
+        get() = sp.getString(KEY_LATEST_TAG, "") ?: ""
+        set(v) = sp.edit().putString(KEY_LATEST_TAG, v).apply()
+
+    /** 上次检查拿到的版本 tag，用来判断要不要再提示一次 */
+    var lastSeenUpdate: String
+        get() = sp.getString(KEY_LAST_SEEN_UPDATE, "") ?: ""
+        set(v) = sp.edit().putString(KEY_LAST_SEEN_UPDATE, v).apply()
+
     companion object {
         const val FILE = "dock_prefs"
 
@@ -257,5 +277,9 @@ class DockPrefs(context: Context) {
         private const val KEY_FORCE_PORTRAIT = "force_portrait"
         private const val KEY_FORCE_PORTRAIT_APPS = "force_portrait_apps"
         private const val KEY_PERF_MODE = "perf_mode"
+        private const val KEY_AUTO_CHECK_UPDATE = "auto_check_update"
+        private const val KEY_LAST_SEEN_UPDATE = "last_seen_update"
+        private const val KEY_LAST_CHECK_AT = "last_check_at"
+        private const val KEY_LATEST_TAG = "latest_tag"
     }
 }
